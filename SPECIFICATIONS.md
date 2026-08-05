@@ -285,8 +285,10 @@ plug-in without plug-in-specific code** (§12.2). The frontend keeps a
 
 - **Dynamic option sources** (`options_source`) the frontend resolves generically
   against existing APIs — `event_catalog` (recognized event types),
-  `classifier_sets` (the tenant's sets) — while `folder` / `principal` are their
-  own pickers. Static choices use inline `options`.
+  `classifier_sets` (the tenant's sets), `mime_catalog` (common MIME types, as a
+  `multiselect` that also accepts free-entry wildcard patterns like `image/*`) —
+  while `folder` / `principal` are their own pickers. Static choices use inline
+  `options`.
 - **Conditional fields:** `visible_when` shows/hides a field based on another
   field's value (e.g. OAuth2 fields only when `auth_type` = client credentials) —
   still fully generic, no per-plug-in code.
@@ -419,12 +421,31 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
       "client_secret": "<secret>", "scopes": ["…"]
     },
     "events": ["file.updated", "review.approved", ...],
+    "mime_types": ["application/pdf", "image/*"],  // optional whitelist (§7.4.1); empty = fire on all
     "grant_read": true,        // mint a scoped READ token so the remote can fetch the file
     "timeout_s": 10, "max_retries": 5
   }
   ```
   Secrets (`token`, `client_secret`) are stored **encrypted** (§10) and injected
   via `ctx.secrets`, never logged or returned by the admin API.
+- **MIME-type whitelist (firing filter).** `mime_types` restricts the webhook to
+  files whose MIME type matches the list, so a remote only ever sees the types it
+  handles.
+  - **Semantics:** empty / absent ⇒ fire on **all** types (no filter). Otherwise
+    the webhook fires **only** when the target file's MIME matches an entry. Entries
+    support a trailing wildcard (`image/*`, `text/*`) and exact types
+    (`application/pdf`). Matching is case-insensitive on the type/subtype.
+  - **MIME resolution:** the event envelope **does not carry `mime`** (per
+    `EVENT_CONTRACT.md`), so folder_actions resolves it from the target
+    `file_uid` — a core `Stat` plus a content sniff (reusing CSAI's `mime`
+    detection) — and caches it per `(file_uid, version)`.
+  - **Fail-closed on a set whitelist:** if a whitelist is configured and the MIME
+    **cannot be resolved** (e.g. the event is folder-scoped, or the file is
+    unreadable) or does **not** match, the webhook is **skipped** for that event
+    (recorded `skipped` in `action_run`, with the reason). A whitelist means "only
+    these types," so an unknown type is excluded, not included.
+  - This is a general filtering pattern; the same `mime_types` predicate may be
+    offered by other actions (e.g. notify) in future without changing the model.
 - **Request:** `POST url` with a JSON body:
   ```jsonc
   {
