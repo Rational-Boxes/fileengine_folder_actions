@@ -84,9 +84,12 @@ retention gaps.
 | any event with `is_rendition: true` | core | CSAI's own rendition write | **ignored** (avoids feedback) |
 
 Notes:
-- **New-file arrives two ways.** A file can enter a folder by **creation**
-  (`file.created`) or by **move** (`file.moved` with the new `parent_uid` = the
-  bound folder). "New file in this folder" actions match both.
+- **New-file arrives three ways.** A file can enter a folder by **creation**
+  (`file.created`), by **copy** (core `Copy` emits `file.created` for the **new
+  uid** — a copy is logically a brand-new file and is handled exactly like any other
+  new file, not as a reference to its source), or by **move** (`file.moved` with the
+  new `parent_uid` = the bound folder). "New file in this folder" actions — and the
+  sorter, via the copy's own `conversion.complete` — match all three.
 - **New-file is a two-event sequence.** Creating a file through the bridges is
   `touch`→`file.created` then `put`→`file.updated`. Non-text actions must dedupe
   so a brand-new file does not double-fire.
