@@ -73,8 +73,8 @@ retention gaps.
 |---|---|---|---|
 | `file.created` | core | file appears in folder (new row) | new-file |
 | `file.updated` | core | new **version** written (PUT) | new-version |
-| `file.moved`   | core | **file enters** folder (when new `parent_uid` = bound folder) or leaves it | new-file / arrival |
-| `conversion.complete` | **CSAI (new, §4)** | extracted text/renditions ready for a version | automatic sorter |
+| `file.moved`   | core | **file enters** folder (when new `parent_uid` = bound folder) or leaves it | new-file / arrival; **sorter (existing file moved in → inbox)** |
+| `conversion.complete` | **CSAI (new, §4)** | extracted text/renditions ready for a version | automatic sorter (new content) |
 | `review.approved` | **discussion (new, §4)** | review request approved | move-on-approval |
 | `review.rejected` | **discussion (new, §4)** | review request rejected | move-on-reject |
 | `thread.opened`, `comment.created`, `mention.created`, `thread.resolved` | **discussion (promoted, §4)** | comment state-change | notify (opt-in) |
@@ -330,16 +330,35 @@ third-party plug-in composed from these types is configurable out of the box.
 
 ### 7.3 Automatic sorter (SmolDocBot classification)
 
-- **Trigger:** `conversion.complete` for a file in the bound folder.
+- **Triggers (two).** The sorter classifies and re-files a file whenever it has
+  ready content in the bound folder, whether the content is **new** or the file was
+  **moved in**:
+  - **`conversion.complete`** — a file's content became ready (new file or new
+    version); text is guaranteed present. Primary path for newly-added content.
+  - **`file.moved` into the bound folder** — an **existing** file was moved in;
+    classify it and route it per the determination. This makes a bound folder an
+    **inbox / drop zone**: move any file in and it is automatically filed to the
+    right destination.
+
+  A `file.moved` whose `actor` is the folder_actions service principal is **ignored**
+  (§3.3), so the sorter's *own* routing move never re-triggers the sorter (no loop /
+  no cascade if the destination also has a sorter binding).
 - **Inputs:** the folder binds a **classifier set** (SmolDocBot YAML, imported via
   `import_export.py`; scored by `classifier.py`) plus a **routing table** mapping
   each classification name → `{ threshold, destination_folder }`. The classifier
   set (reusable) and the per-folder routing live in the DB (§10); the YAML stays
   the pure classifier definition so the same set can route differently per folder.
 - **Behavior:**
-  1. Fetch the file's **extracted Markdown** (the normalized text backing CSAI's
-     search index) for the ready version from CSAI — the same source-agnostic
-     text surface a webhook can request as `format=markdown` (§7.4).
+  1. Resolve the file's current version and fetch its **extracted Markdown** (the
+     normalized text backing CSAI's search index) from CSAI — the same
+     source-agnostic text surface a webhook can request as `format=markdown` (§7.4).
+     - On **`conversion.complete`** the ready version is named by the event.
+     - On **`file.moved`** the file is usually already converted, so its text is
+       available immediately. If its text is **not yet available** (never converted,
+       or events were off when it was created), the sorter **defers** rather than
+       classifying empty text: it requests conversion (CSAI
+       `POST /documents/{uid}/convert`) and lets the ensuing `conversion.complete`
+       re-fire the sort.
   2. Run `document_classifier(text, classifier_set)` → `{classification: score}`.
      **Scores are unbounded weighted sums** (sum of matched term weights), not
      normalized confidences; thresholds are expressed in the same weight units.
@@ -350,7 +369,9 @@ third-party plug-in composed from these types is configurable out of the box.
      in place** (logged, no move).
   5. `Move(file_uid, destination_folder)` as the service principal; record the
      winning classification, score, and provenance in `action_run`.
-- **Idempotent** on `(event_id, binding)`; already-in-destination is a no-op.
+- **Idempotent** on `(event_id, binding)`; already-in-destination is a no-op — so a
+  file that lands on its correct destination is not moved again, and a moved-in file
+  already classified to *this* folder stays put.
 
 #### 7.3.1 Classifier sets — editor, import/export, and tuning
 
