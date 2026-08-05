@@ -204,8 +204,12 @@ Actions are **in-process Python plug-ins** discovered at startup.
   ```python
   class ActionPlugin(Protocol):
       type_name: str                      # e.g. "sorter", "webhook"
-      ConfigModel: type[pydantic.BaseModel]   # validates binding.config
+      label: str                          # human name for the "add action" UI
       supported_events: set[str]          # recognized types this action may bind to
+      ConfigModel: type[pydantic.BaseModel]   # typed config; server-side validation
+
+      @classmethod
+      def config_fields(cls) -> list[FieldDescriptor]: ...  # generic form schema (§6.1)
 
       def execute(self, event: dict, config: ConfigModel,
                   ctx: ActionContext) -> ActionResult: ...
@@ -222,6 +226,75 @@ Actions are **in-process Python plug-ins** discovered at startup.
 - **Failure isolation:** an exception from `execute` fails only that binding's run
   for that event (recorded in `action_run`), never the consumer loop or other
   bindings. See retry policy §8.
+
+### 6.1 Config field descriptors (generic form contract)
+
+Each plug-in **publishes a typed list of config field descriptors** — a
+declarative form schema — so a **generic frontend renders a config form for any
+plug-in without plug-in-specific code** (§12.2). The frontend keeps a
+**field-type → widget registry**; a plug-in that reuses existing field types needs
+**zero** frontend work, and only a brand-new field *type* requires a new widget.
+
+- **Enumeration API:** `GET /action-types` →
+  `[{ type_name, label, description, supported_events, fields: [FieldDescriptor…] }]`.
+  The frontend builds the entire "add / edit action" form from this response.
+- **The server stays the validation authority.** Descriptors carry the constraints,
+  and the service validates `binding.config` against them **and** the plug-in's
+  `ConfigModel` on write — a generic UI never weakens server-side validation. (A
+  plug-in may derive its descriptors from its `ConfigModel`, or declare them
+  directly; the descriptors are the canonical *form* schema, `ConfigModel` the
+  typed/validated representation.)
+
+**FieldDescriptor** shape:
+
+```jsonc
+{
+  "key": "timeout_s",             // config key it sets
+  "label": "Timeout (seconds)",
+  "type": "integer",              // from the standard catalog below
+  "required": false,
+  "default": 10,
+  "help": "How long to wait for the remote.",
+  // type-specific (only the relevant ones present):
+  "min": 1, "max": 120, "step": 1,               // number / integer
+  "max_length": 2048, "pattern": "^https://",     // string
+  "options": [{ "value": "bearer", "label": "Bearer token" }],  // static select
+  "options_source": "event_catalog",              // dynamic options (see below)
+  "item_fields": [ /* FieldDescriptor… */ ],      // rows of a group/array
+  "secret": true,                                 // write-only, never returned
+  "visible_when": { "key": "auth_type", "equals": "oauth2_client_credentials" }
+}
+```
+
+**Standard field-type catalog** (the generic renderer's widget registry):
+
+| `type` | Widget | Used by (examples) |
+|---|---|---|
+| `string` | single-line text | webhook URL, classification name |
+| `text` | multi-line text | notify template body |
+| `integer` / `number` | number input (min/max/step) | timeout, retries, threshold, distance, weight, priority |
+| `boolean` | toggle | `recursive`, `grant_read` |
+| `select` | dropdown (static `options`) | auth type, read-back `format` |
+| `multiselect` | multi-chip select | `on_events` (source `event_catalog`) |
+| `secret` | write-only field, never rendered back | webhook token, client secret |
+| `folder` | **folder picker** | move destinations, `on_approved` / `on_rejected` |
+| `file` | file picker | test-panel file selection |
+| `principal` | **user/role picker** (LDAP autocomplete) | notify recipients |
+| `ref` | dropdown from a service list (`options_source`) | classifier-set reference |
+| `group` | **repeatable rows** of nested `item_fields` | sorter routing table, recipient list |
+
+- **Dynamic option sources** (`options_source`) the frontend resolves generically
+  against existing APIs — `event_catalog` (recognized event types),
+  `classifier_sets` (the tenant's sets) — while `folder` / `principal` are their
+  own pickers. Static choices use inline `options`.
+- **Conditional fields:** `visible_when` shows/hides a field based on another
+  field's value (e.g. OAuth2 fields only when `auth_type` = client credentials) —
+  still fully generic, no per-plug-in code.
+
+This renders the four built-ins declaratively — e.g. the **sorter's routing table**
+is a `group` of `{ ref classification, number threshold, folder destination,
+integer priority }`, and **notify recipients** a `group`/`principal` list — and any
+third-party plug-in composed from these types is configurable out of the box.
 
 ---
 
@@ -412,8 +485,9 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
 ## 9. Service shape
 
 **Entry points** (`[project.scripts]`), one image, several compose commands:
-- `folder-actions` — FastAPI admin API (bindings CRUD, **classifier-set editor**
-  — CRUD + import/export + test-score, §7.3.1 — run-log queries) on **:8099**.
+- `folder-actions` — FastAPI admin API (bindings CRUD, **`GET /action-types`**
+  field-schema enumeration §6.1, **classifier-set editor** — CRUD + import/export +
+  test-score, §7.3.1 — run-log queries) on **:8099**.
 - `folder-actions-consumer` — the Redis-Streams worker (portless).
 - `folder-actions-reconcile` — periodic reconcile sweep (portless / cron).
 
@@ -516,9 +590,12 @@ surfaces needed:
    READ on the folder; editable only with WRITE/MANAGE_ACL (§5). Distinguishes
    folder-only vs `recursive` bindings.
 
-2. **Per-action config forms.** One form per action type, ideally **schema-driven**
-   from each plug-in's advertised `ConfigModel` (§6) so a new plug-in gets a usable
-   form without a frontend change:
+2. **Per-action config forms.** One **generic form renderer** driven by each
+   plug-in's published **config field descriptors** (§6.1) via `GET /action-types`
+   — a **field-type → widget registry** (string, number, select, `secret`,
+   `folder` picker, `principal` picker, repeatable `group`, …). A new plug-in that
+   composes existing field types needs **no frontend change**; only a brand-new
+   field *type* adds a widget. The built-ins render through this same path:
    - *Move on approve/reject* — destination **folder pickers** for `on_approved` /
      `on_rejected`.
    - *Notify* — **user/role recipient picker** (LDAP directory autocomplete,
