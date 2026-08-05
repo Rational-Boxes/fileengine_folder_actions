@@ -435,10 +435,21 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
     the webhook fires **only** when the target file's MIME matches an entry. Entries
     support a trailing wildcard (`image/*`, `text/*`) and exact types
     (`application/pdf`). Matching is case-insensitive on the type/subtype.
-  - **MIME resolution:** the event envelope **does not carry `mime`** (per
-    `EVENT_CONTRACT.md`), so folder_actions resolves it from the target
-    `file_uid` — a core `Stat` plus a content sniff (reusing CSAI's `mime`
-    detection) — and caches it per `(file_uid, version)`.
+  - **MIME resolution is content-based (anti-spoofing).** The event envelope
+    **does not carry `mime`** (per `EVENT_CONTRACT.md`), and the whitelist must
+    **not** trust the filename extension — that would be trivially spoofable. So
+    folder_actions reads a **byte prefix** (~first 8 KiB) of the target `file_uid`
+    via core `GetFile`/range and **content-sniffs** it with CSAI's
+    `mime.detect(data, name)`: a magic-byte table + OOXML/ZIP container sniff +
+    `libmagic` (`python-magic`, an optional dep) when available, with the filename
+    extension only as a **last resort**. Renaming `malware.exe` to `report.pdf`
+    therefore does **not** satisfy an `application/pdf` whitelist — the match is on
+    the actual bytes. The resolved type is cached per `(file_uid, version)`.
+  - **Extension-only guesses are low-confidence.** When content sniffing is
+    inconclusive and only the filename yields a type, a whitelist match is treated
+    as **unresolved → skip** (fail-closed) — a spoofed name cannot pass the filter
+    by extension alone. (Content-sniffed AEC/CAD text formats like IFC/STEP/STL are
+    covered by CSAI's sniffer, so they match normally.)
   - **Fail-closed on a set whitelist:** if a whitelist is configured and the MIME
     **cannot be resolved** (e.g. the event is folder-scoped, or the file is
     unreadable) or does **not** match, the webhook is **skipped** for that event
