@@ -439,6 +439,7 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
     },
     "events": ["file.updated", "review.approved", ...],
     "mime_types": ["application/pdf", "image/*"],  // optional whitelist (§7.4.1); empty = fire on all
+    "context": { "project": "Acme Tower", "stage": "design-review" },  // arbitrary admin key:values (§7.4.2)
     "grant_read": true,        // mint a scoped READ token so the remote can fetch the file
     "timeout_s": 10, "max_retries": 5
   }
@@ -474,6 +475,15 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
     these types," so an unknown type is excluded, not included.
   - This is a general filtering pattern; the same `mime_types` predicate may be
     offered by other actions (e.g. notify) in future without changing the model.
+- **Custom context (admin-authored, §7.4.2).** `context` is an **arbitrary
+  key:value map** the administrator authors when configuring the webhook, sent
+  **verbatim** with every POST under the top-level `context` key — for routing
+  hints, project/tenant tags, correlation ids, or whatever additional context the
+  remote needs. It is **static** (identical on every fire of this binding),
+  namespaced under `context` so it never collides with reserved payload fields, and
+  **not a secret store** (it is plaintext and readable back via the admin API — use
+  `auth` for credentials). The generic form renders it as a repeatable `group` of
+  `{ string key, string value }` (§6.1).
 - **Request:** `POST url` with a JSON body:
   ```jsonc
   {
@@ -488,7 +498,8 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
       "renditions": []                       // available formats; [] when non-previewable
     },
     "user": { "actor": "<event.actor>" },   // the acting user identity
-    "folder_uid": "<bound folder>"
+    "folder_uid": "<bound folder>",
+    "context": { "project": "Acme Tower", "stage": "design-review" }  // admin-authored (§7.4.2)
   }
   ```
   Auth to the remote: `Authorization: Bearer <token>` (static) or an **OAuth 2.0
