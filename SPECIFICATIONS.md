@@ -634,21 +634,30 @@ action core-calls use it, which also drives loop-avoidance (§3.3).
 
 Per the platform's UI-ownership convention, all end-user UI lives in the
 **frontend** Vue 3 SPA, not here; folder_actions exposes the REST APIs these
-surfaces consume (bearer-JWT auth, same stack as the other services). The
-surfaces needed:
+surfaces consume (bearer-JWT auth, same stack as the other services).
 
-1. **Folder actions panel.** In the folder/file browser (folder detail / settings),
-   list a folder's action bindings — type, trigger events, config summary, enabled
-   toggle, last-run status — with add / edit / delete. Shown only to users with
-   READ on the folder; editable only with WRITE/MANAGE_ACL (§5). Distinguishes
-   folder-only vs `recursive` bindings.
+**Interaction model — summary in the drawer, full editor in a modal overlay.**
+The file/folder **drawer tab** carries only a compact **summary** (the folder's
+bindings, their state, quick enable/disable/delete). The actual **authoring UI is
+too complex for the drawer** — schema-driven field forms with folder/principal
+pickers and repeatable groups, and especially the classifier editor with its test
+panel — so **add / edit opens a full modal overlay** (a focused, roomier surface),
+not an inline drawer form. The surfaces needed:
 
-2. **Per-action config forms.** One **generic form renderer** driven by each
-   plug-in's published **config field descriptors** (§6.1) via `GET /action-types`
-   — a **field-type → widget registry** (string, number, select, `secret`,
-   `folder` picker, `principal` picker, repeatable `group`, …). A new plug-in that
-   composes existing field types needs **no frontend change**; only a brand-new
-   field *type* adds a widget. The built-ins render through this same path:
+1. **Folder actions panel (drawer summary).** In the folder/file browser drawer, a
+   tab **summarizing** the folder's action bindings — type, trigger events, a
+   one-line config summary, enabled toggle, last-run status — with quick
+   enable/disable/delete and an **"add / edit → opens the modal editor"** affordance.
+   Shown only to users with READ on the folder; editable only with WRITE/MANAGE_ACL
+   (§5). Distinguishes folder-only vs `recursive` bindings.
+
+2. **Binding editor (modal overlay).** The full add/edit surface, opened over the
+   drawer/browser. One **generic form renderer** driven by each plug-in's published
+   **config field descriptors** (§6.1) via `GET /action-types` — a
+   **field-type → widget registry** (string, number, select, `secret`, `folder`
+   picker, `principal` picker, repeatable `group`, …). A new plug-in that composes
+   existing field types needs **no frontend change**; only a brand-new field *type*
+   adds a widget. The built-ins render through this same path:
    - *Move on approve/reject* — destination **folder pickers** for `on_approved` /
      `on_rejected`.
    - *Notify* — **user/role recipient picker** (LDAP directory autocomplete,
@@ -660,8 +669,11 @@ surfaces needed:
      `grant_read` + default read-back `format`, timeout / retries. **Secret fields
      are write-only** — entered once, never rendered back (§11).
 
-3. **Classifier set editor** (§7.3.1) — a **tenant-level admin** surface (sets are
-   reused across folders, so it lives in settings/admin, not under one folder):
+3. **Classifier set editor (modal overlay)** (§7.3.1) — a **tenant-level admin**
+   surface (sets are reused across folders, so it lives in settings/admin, not under
+   one folder). The richest editor of all — classifications, terms, wildcards,
+   import/export, and the live test panel — so it warrants a **full modal overlay**
+   (or dedicated full-page view), not a drawer form:
    - List / create / rename / delete sets.
    - Edit classifications and terms (term string, `distance`, `weight`, with inline
      help for the `*` / `?` / `#` wildcards).
