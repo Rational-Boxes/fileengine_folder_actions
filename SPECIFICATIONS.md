@@ -75,6 +75,7 @@ retention gaps.
 | `file.updated` | core | new **version** written (PUT) | new-version |
 | `file.moved`   | core | **file enters** folder (when new `parent_uid` = bound folder) or leaves it | new-file / arrival; **sorter (existing file moved in → inbox)** |
 | `conversion.complete` | **CSAI (new, §4)** | extracted text/renditions ready for a version | automatic sorter (new content) |
+| `conversion.failed` | **CSAI (new, §4)** | conversion resolved with **no** renditions — `reason` `unsupported` (non-previewable type) or `error` | webhook (still fire on non-previewable types); sorter (terminate deferral → skip) |
 | `review.approved` | **discussion (new, §4)** | review request approved | move-on-approval |
 | `review.rejected` | **discussion (new, §4)** | review request rejected | move-on-reject |
 | `thread.opened`, `comment.created`, `mention.created`, `thread.resolved` | **discussion (promoted, §4)** | comment state-change | notify (opt-in) |
@@ -124,14 +125,24 @@ folder_actions' recognized triggers require these **small, additive** changes in
 sibling services. They are additive to `EVENT_CONTRACT.md` (`schema` stays `1`;
 new types, unknown-tolerant consumers unaffected).
 
-1. **`convert_search_ai` — emit `conversion.complete`.** CSAI gains an
-   `EventPublisher` (mirroring `discussion/events.py`) that, **after** it durably
-   writes a file's extracted text/renditions, `XADD`s a `conversion.complete`
-   event to `fileengine:events`. Best-effort (never fails ingestion). Payload:
-   base envelope + `file_uid`, the **source `version`** that became ready,
-   `tenant`, `actor`, and a hint of what is available (e.g.
-   `renditions: ["text", ...]`). An optional `conversion.failed` may be emitted
-   for observability; folder_actions consumes only `conversion.complete`.
+1. **`convert_search_ai` — emit a terminal conversion outcome.** CSAI gains an
+   `EventPublisher` (mirroring `discussion/events.py`) that, once a file's
+   conversion **resolves**, `XADD`s one of two terminal events to
+   `fileengine:events` (best-effort, never fails ingestion):
+   - **`conversion.complete`** — after it durably writes the extracted
+     text/renditions. Payload: base envelope + `file_uid`, the **source `version`**
+     that became ready, `tenant`, `actor`, and `renditions: ["text", "pdf", …]`
+     (what is available).
+   - **`conversion.failed`** — conversion did not produce renditions, carrying a
+     **`reason`**: `unsupported` (a **non-previewable type** — no converter exists,
+     so a rendition will *never* arrive) or `error` (a converter was attempted and
+     failed). Same envelope; `renditions: []`.
+
+   Both are **terminal** — exactly one fires per resolved version — so a consumer
+   that must wait for content resolution can key off either and never hang on a
+   file that simply cannot be converted. (This replaces the earlier "optional,
+   observability-only" framing: `conversion.failed` is now a first-class recognized
+   event because webhooks and the sorter depend on the *non-previewable* signal.)
 
 2. **`discussion_threaded_communication` — promote collaboration events to the
    recognized stream and add explicit review states.**
@@ -360,7 +371,10 @@ third-party plug-in composed from these types is configurable out of the box.
        or events were off when it was created), the sorter **defers** rather than
        classifying empty text: it requests conversion (CSAI
        `POST /documents/{uid}/convert`) and lets the ensuing `conversion.complete`
-       re-fire the sort.
+       re-fire the sort. If **`conversion.failed`** arrives instead (non-previewable
+       type or error), the sorter **stops deferring and skips** (recorded `skipped`
+       in `action_run`) — a file with no extractable text cannot be classified, so
+       it is left in place rather than deferred indefinitely.
   2. Run `document_classifier(text, classifier_set)` → `{classification: score}`.
      **Scores are unbounded weighted sums** (sum of matched term weights), not
      normalized confidences; thresholds are expressed in the same weight units.
@@ -460,10 +474,16 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
 - **Request:** `POST url` with a JSON body:
   ```jsonc
   {
-    "event": "review.approved",
+    "event": "conversion.failed",
     "document_id": "<file_uid>", "version": "<version>",
     "tenant": "default",
     "metadata": { /* current core file metadata */ },
+    "mime": "application/x-lorem",           // the content-sniffed type (§7.4.1)
+    "conversion": {                          // so the remote knows what it can read back
+      "status": "failed",                    // "complete" | "failed" | "unknown"
+      "reason": "unsupported",               // present on failed: "unsupported" | "error"
+      "renditions": []                       // available formats; [] when non-previewable
+    },
     "user": { "actor": "<event.actor>" },   // the acting user identity
     "folder_uid": "<bound folder>"
   }
@@ -503,6 +523,21 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
     (e.g. `202` + `Retry-After`) for a missing rendition so the remote polls, and
     MAY **on-demand generate** it via CSAI `POST /documents/{uid}/convert`
     (bounded wait) before serving. `original` is always available immediately.
+- **Non-previewable types must still fire.** Some files can never be converted
+  (no converter for the type) — binding only to `conversion.complete` would drop
+  them silently. To fire on **content resolution regardless of previewability**,
+  bind to **both `conversion.complete` and `conversion.failed`** (the terminal
+  outcome pair, §4). Exactly one fires per version, so the webhook always runs once
+  the file's fate is known.
+  - The request's **`conversion` block** tells the remote what to expect:
+    `status: "complete"` with a non-empty `renditions` list, or `status: "failed"`
+    (`reason: "unsupported" | "error"`) with `renditions: []`.
+  - On a `failed`/non-previewable file, only **`original`** is available on
+    read-back; a `markdown`/`pdf`/… request returns **not available** (`409`/`404`)
+    rather than looping on `Retry-After` — there is nothing coming.
+  - For events **not** gated on conversion (`file.updated`, `review.*`, comment,
+    move), the `conversion` block is filled **best-effort** from current rendition
+    state (`status: "unknown"` if not yet resolved).
 - **Response handling:** on `2xx`, the returned JSON may contain:
   - **`move_to`**: a folder UUID → `Move(file_uid, move_to)` as the service
     principal (validated like §7.1).
@@ -768,6 +803,6 @@ the discussion review lifecycle.
   per-folder classifier sets; sorter tie-break = highest-score-then-priority;
   own Postgres DB; ACL-governed bindings; dedicated service-principal identity.
 - **Future:** additional built-in actions (tag/metadata stamp, copy-instead-of-
-  move, retention/cull triggers); a `conversion.failed` reaction; digest-style
-  batched notifications; per-binding dry-run/preview; metrics/Prometheus surface;
-  transport swap (Kafka/NATS) behind the same `EventSource` interface.
+  move, retention/cull triggers); digest-style batched notifications; per-binding
+  dry-run/preview; metrics/Prometheus surface; transport swap (Kafka/NATS) behind
+  the same `EventSource` interface.
