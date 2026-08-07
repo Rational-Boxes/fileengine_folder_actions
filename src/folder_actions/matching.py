@@ -27,9 +27,12 @@ from typing import Iterable
 
 log = logging.getLogger("folder_actions.matching")
 
-# Review/comment events are anchored to a ``file_uid`` (not a folder ``parent_uid``);
-# folder membership is resolved from that file's *current* parent (§3.2).
-_ANCHORED_PREFIXES = ("review.", "thread.", "comment.", "mention.")
+# Events anchored to a ``file_uid`` with no reliable ``parent_uid`` in the envelope —
+# folder membership is resolved from that file's *current* parent via core (§3.2).
+# Review/comment events are file-anchored by nature; ``conversion.*`` events are
+# emitted by CSAI (not the core publisher) and are NOT enriched with parent_uid, so
+# they must be resolved the same way.
+_ANCHORED_PREFIXES = ("review.", "thread.", "comment.", "mention.", "conversion.")
 
 # Bound depth for the recursive-binding ancestry walk (§3.2 "bounded depth, cached").
 _MAX_ANCESTRY_DEPTH = 32
@@ -63,11 +66,19 @@ def folder_uids_for_event(event: dict, core) -> set[str]:
         return uids
 
     parent_uid = event.get("parent_uid")
+    file_uid = event.get("file_uid")
     if parent_uid:
         uids.add(parent_uid)
-    file_uid = event.get("file_uid")
     if file_uid:
         uids.add(file_uid)
+        # Fallback: an emitter that didn't enrich parent_uid — resolve the current parent.
+        if not parent_uid:
+            try:
+                parent = core.parent_of(file_uid)
+            except Exception:
+                parent = ""
+            if parent:
+                uids.add(parent)
     return uids
 
 

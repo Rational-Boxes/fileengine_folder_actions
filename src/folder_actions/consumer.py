@@ -64,14 +64,25 @@ class EventConsumer:
                  discussion=None) -> None:
         self.config = config
         self.store = store
-        self.core = core or CoreClient(config)
         self.csai = csai or CsaiClient(config)
         self.directory = directory or Directory(config)
         self.mailer = mailer or SmtpMailer(config)
         self.secrets = secrets or SecretBox(config.secret_key)
-        self.mime = mime or MimeResolver(self.core)
         self.discussion = discussion or DiscussionClient(config)
         self.service_actor = service_actor(config)
+        # A core client per tenant — folder_actions consumes the shared multi-tenant
+        # stream, so every core op must run in the *event's* tenant (§3.2). Injected
+        # overrides (tests) win for the default tenant.
+        self._core_override = core
+        self._core_cache: dict[str, CoreClient] = {}
+
+    def _core(self, tenant: str) -> CoreClient:
+        t = tenant or "default"
+        if self._core_override is not None and t == (self.config.tenant or "default"):
+            return self._core_override
+        if t not in self._core_cache:
+            self._core_cache[t] = CoreClient(self.config, t)
+        return self._core_cache[t]
 
     # ------------------------------------------------------------------ dispatch
     def handle(self, event: dict) -> bool:
@@ -93,8 +104,9 @@ class EventConsumer:
         # human-gated chains (raise_review -> approve -> move -> raise_review) work.
 
         tenant = event.get("tenant") or "default"
+        core = self._core(tenant)   # bound to the event's tenant (§3.2)
         try:
-            bindings = bindings_for_event(event, self.store, self.core)
+            bindings = bindings_for_event(event, self.store, core)
         except Exception:
             log.exception("failed to resolve bindings for event %s", event_id)
             return False
@@ -102,7 +114,7 @@ class EventConsumer:
         redeliver = False
         for binding in bindings:
             try:
-                if self._run_binding(event, binding, tenant, event_id):
+                if self._run_binding(event, binding, tenant, event_id, core):
                     redeliver = True
             except Exception:
                 # Isolation: one binding failing never aborts the loop (§6/§8).
@@ -113,9 +125,10 @@ class EventConsumer:
         return redeliver
 
     def _run_binding(self, event: dict, binding: dict, tenant: str,
-                     event_id: str) -> bool:
+                     event_id: str, core: CoreClient) -> bool:
         """Run a single binding for an event. Returns ``True`` iff the run was a
-        retryable (non-terminal) failure and the entry should not yet be acked."""
+        retryable (non-terminal) failure and the entry should not yet be acked.
+        ``core`` is bound to the event's tenant (§3.2)."""
         binding_id = str(binding.get("id"))
         action_type = binding.get("action_type") or ""
         file_uid = event.get("file_uid") or ""
@@ -165,9 +178,10 @@ class EventConsumer:
         # Binding-level MIME-type filter (applies to any action). Content-sniffed and
         # fail-closed: if a whitelist is set and the file's MIME can't be resolved or
         # doesn't match, skip (§7.4.1 generalized to the binding).
+        mime_resolver = MimeResolver(core)  # content-sniff in the event's tenant
         mime_types = binding.get("mime_types") or []
         if mime_types:
-            mime = self.mime.resolve(file_uid) if file_uid else None
+            mime = mime_resolver.resolve(file_uid) if file_uid else None
             if mime is None or not mime_matches(mime, mime_types):
                 self.store.record_run(
                     tenant, event_id=event_id, binding_id=binding_id,
@@ -179,9 +193,9 @@ class EventConsumer:
         ctx = ActionContext(
             tenant=tenant, binding_id=binding_id,
             folder_uid=binding.get("folder_uid") or "",
-            core=self.core, csai=self.csai, directory=self.directory,
+            core=core, csai=self.csai, directory=self.directory,
             discussion=self.discussion, mailer=self.mailer, secrets=self.secrets,
-            mime=self.mime, store=self.store, config=self.config, log=log)
+            mime=mime_resolver, store=self.store, config=self.config, log=log)
 
         try:
             result = plugin_cls().execute(event, cfg_model, ctx)

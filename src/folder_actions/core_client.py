@@ -70,9 +70,12 @@ class CoreClient:
     """Thin action-facing wrapper over a service-principal ``ManagedFiles``. Exposes
     only what the plug-ins need; all calls act as the service principal."""
 
-    def __init__(self, config):
+    def __init__(self, config, tenant: Optional[str] = None):
         self.config = config
-        self.tenant = config.tenant
+        # folder_actions consumes the shared multi-tenant stream, so a core client is
+        # bound to the *event's* tenant (falling back to the config default), not a
+        # single fixed tenant — every op runs in that tenant's schema.
+        self.tenant = tenant or config.tenant
         self.actor = service_actor(config)
         self._mf = None
 
