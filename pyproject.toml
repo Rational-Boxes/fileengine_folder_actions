@@ -1,0 +1,42 @@
+[project]
+name = "folder-actions"
+version = "0.1.0"
+description = "FileEngine folder-actions: extensible actions bound to virtual folders, driven by the recognized event stream"
+license = {text = "AGPL-3.0-or-later"}
+authors = [{name = "James Hickman", email = "james@rationalboxes.com"}]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.30",
+    "ldap3>=2.9",
+    "grpcio>=1.50",
+    "protobuf>=4.21",
+    "psycopg[binary]>=3.1",
+    "redis>=5.0",
+    "pydantic>=2.0",
+    "rapidfuzz>=3.0",        # deterministic classifier scorer (vendored classifier.py)
+    "cryptography>=41",      # webhook secret encryption at rest (secrets.py)
+    "PyYAML>=6.0",           # classifier-set YAML import/export
+    "python-multipart>=0.0.9",  # classifier-set YAML file upload (import endpoint)
+]
+# The FileEngine Python client (`fileengine`, from ../python_interface) is reused at
+# runtime for gRPC core access; install it (`pip install ../python_interface`) or rely
+# on the sibling-checkout bootstrap in folder_actions._client.
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "httpx>=0.27"]
+
+[project.scripts]
+folder-actions = "folder_actions.app:main"              # admin API (:8099)
+folder-actions-consumer = "folder_actions.consumer:main"    # recognized-event worker
+folder-actions-reconcile = "folder_actions.reconcile:main"  # periodic reconcile sweep
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = ["live: integration test that needs LDAP + the gRPC core + Postgres + Redis reachable"]
