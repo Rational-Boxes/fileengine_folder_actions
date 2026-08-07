@@ -736,11 +736,19 @@ DB-wide `migrations/0001_baseline.sql` only bootstraps extensions — mirroring
 - **Binding config** is written/read only by users holding WRITE/MANAGE_ACL / READ
   on the folder (checked as the calling user via core `CheckPermission`).
 - **Action execution** runs as a dedicated **folder_actions service principal**
-  (§7.5): automation may move a file into, or write metadata on, a destination the
-  triggering user could not write — actions are the folder owner's configured
-  automation, authorized at *binding* time, not at *event* time. The service
-  principal's gRPC access is inside the trusted zone; the gRPC port is never
-  network-exposed.
+  (§7.5), **never as the triggering user** — so an action is **not gated by the
+  effective permissions of the user who created or moved-in the file**. A document may
+  be moved into (or have metadata written on) a folder the triggering user has **no
+  access to at all** — not read, not write — and the move must **not** be blocked by
+  that user's ACLs. This is intentional: actions are the folder owner's configured
+  automation, authorized at *binding* time (when an admin with WRITE/MANAGE_ACL on the
+  folder set them up), not re-checked against the acting user at *event* time. The
+  **only** ACL that governs a move is the **service principal's** WRITE on the
+  destination. Consequences worth stating: a submit-then-hand-off workflow (drop a file
+  in an intake folder → it is auto-routed to a review folder the submitter can't see) is
+  a first-class use case; and the triggering user simply loses visibility of the file
+  once it lands where they lack access — expected, not an error. The service principal's
+  gRPC access is inside the trusted zone; the gRPC port is never network-exposed.
 - **Webhook read-back** is the only outward data exposure: a **short-lived,
   single-file, READ-scoped** token, revoked/expired after use.
 - **Secrets** (webhook tokens/client secrets) are encrypted at rest and never
@@ -748,10 +756,17 @@ DB-wide `migrations/0001_baseline.sql` only bootstraps extensions — mirroring
 - **Loopback-only monitoring** endpoints (§9), per platform convention.
 
 ### 7.5 The service principal
-A dedicated identity (`FA_SERVICE_PRINCIPAL`, e.g. `svc:folder_actions`) with a
-role granting the writes the actions need (Move/SetMetadata on managed folders).
-It is **not** `system_admin`; scope it to the folders/tenants it manages. All
-action core-calls use it, which also drives loop-avoidance (§3.3).
+A dedicated identity (`FILEENGINE_FA_USER` / `FILEENGINE_FA_PASSWORD`, e.g.
+`svc:folder_actions`) with a role granting the writes the actions need
+(Move/SetMetadata on the folders it manages). **Every** action core-call binds this
+identity — moves/metadata are performed *as the service principal*, independent of and
+never gated by the triggering user's permissions (§11). It also drives loop-avoidance
+(§3.3). **Operational requirement:** the service principal must therefore hold WRITE on
+every folder any action routes *into* (across the folder graph a chain can span); a
+move to a destination the principal cannot write fails (recorded `failed`), so grant it
+appropriately — the cleanest is a role with WRITE on the managed-folder subtree (or
+`system_admin` if it legitimately manages the whole tenant, though least-privilege is
+preferred).
 
 ---
 
