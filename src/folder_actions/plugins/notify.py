@@ -15,10 +15,11 @@
 
 """Notify user/group action (SPECIFICATIONS.md §7.2).
 
-On any recognized event listed in ``events``, email the configured recipients in
-real time (one email per event, not digested), best-effort via the SMTP mailer. A
-``role:<name>`` recipient fans out to all members of the tenant role. The actor is
-never self-notified; SMTP being unconfigured skips the run (logged, no email)."""
+On any event the binding is bound to (the binding's ``on_events`` — notify does not
+re-declare its own event list), email the configured recipients in real time (one
+email per event, not digested), best-effort via the SMTP mailer. A ``role:<name>``
+recipient fans out to all members of the tenant role. The actor is never
+self-notified; SMTP being unconfigured skips the run (logged, no email)."""
 from __future__ import annotations
 
 import logging
@@ -26,7 +27,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from .base import ActionContext, ActionResult, FieldDescriptor, FieldOption, register
+from .base import ActionContext, ActionResult, FieldDescriptor, register
 
 log = logging.getLogger("folder_actions.plugins.notify")
 
@@ -47,8 +48,7 @@ class NotifyAction:
 
     class ConfigModel(BaseModel):
         recipients: list[str] = []       # uids, emails, or "role:<name>"
-        events: list[str] = []           # subset to fire on; empty => all supported
-        template: Optional[str] = None   # optional body kind/override (§7.2)
+        template: Optional[str] = None   # optional email template (§7.2)
 
     @classmethod
     def config_fields(cls) -> list[FieldDescriptor]:
@@ -62,12 +62,6 @@ class NotifyAction:
                 ],
             ),
             FieldDescriptor(
-                key="events", label="On events", type="multiselect",
-                options_source="event_catalog",
-                help="Which recognized events trigger a notification. "
-                     "Empty means every supported event.",
-            ),
-            FieldDescriptor(
                 key="template", label="Email template", type="ref", required=False,
                 options_source="notify_templates",
                 help="Optional event-notification email template (managed under "
@@ -77,11 +71,10 @@ class NotifyAction:
 
     def execute(self, event: dict, config: "NotifyAction.ConfigModel",
                 ctx: ActionContext) -> ActionResult:
+        # Which events fire this action is the binding's on_events (enforced by the
+        # consumer before we're called) — notify does not re-filter (no redundant
+        # per-action event list).
         etype = event.get("type")
-        allowed = set(config.events) if config.events else set(SUPPORTED)
-        if etype not in allowed:
-            return ActionResult.skipped("event_filtered", event=etype)
-
         if not ctx.mailer.configured:
             return ActionResult.skipped("smtp_unconfigured")
 
