@@ -63,7 +63,6 @@ class WebhookAction:
     class ConfigModel(BaseModel):
         url: str
         auth: dict = {}                 # {type: bearer|oauth2_client_credentials, ...}
-        events: list[str] = []          # subset to fire on; empty => all supported
         mime_types: list[str] = []      # firing whitelist (§7.4.1); empty => all
         context: dict[str, str] = {}    # admin-authored static context (§7.4.2)
         grant_read: bool = False        # mint scoped read-back token (v1: accepted, TODO)
@@ -100,10 +99,6 @@ class WebhookAction:
                             visible_when={"key": "auth_type",
                                           "equals": "oauth2_client_credentials"}),
             FieldDescriptor(
-                key="events", label="On events", type="multiselect",
-                options_source="event_catalog",
-                help="Which recognized events fire this webhook. Empty means all."),
-            FieldDescriptor(
                 key="mime_types", label="MIME whitelist", type="multiselect",
                 options_source="mime_catalog",
                 help="Only fire when the file's content-sniffed MIME matches. "
@@ -129,9 +124,9 @@ class WebhookAction:
     # ------------------------------------------------------------------ execute
     def execute(self, event: dict, config: "WebhookAction.ConfigModel",
                 ctx: ActionContext) -> ActionResult:
+        # Which events fire this webhook is the binding's on_events (enforced by the
+        # consumer) — no redundant per-action event list.
         etype = event.get("type")
-        if config.events and etype not in config.events:
-            return ActionResult.skipped("event_filtered", event=etype)
         if not config.url:
             return ActionResult.failed("no_url")
 
