@@ -35,7 +35,7 @@ from .directory import Directory
 from .events import RedisEventSource
 from .mailer import SmtpMailer
 from .matching import bindings_for_event
-from .mime import MimeResolver
+from .mime import MimeResolver, mime_matches
 from .plugins.base import (
     STATUS_DONE,
     STATUS_FAILED,
@@ -147,6 +147,20 @@ class EventConsumer:
                 status=STATUS_FAILED,
                 detail={"reason": "invalid_config", "errors": e.errors()})
             return False
+
+        # Binding-level MIME-type filter (applies to any action). Content-sniffed and
+        # fail-closed: if a whitelist is set and the file's MIME can't be resolved or
+        # doesn't match, skip (§7.4.1 generalized to the binding).
+        mime_types = binding.get("mime_types") or []
+        if mime_types:
+            mime = self.mime.resolve(file_uid) if file_uid else None
+            if mime is None or not mime_matches(mime, mime_types):
+                self.store.record_run(
+                    tenant, event_id=event_id, binding_id=binding_id,
+                    action_type=action_type, file_uid=file_uid, version=version,
+                    status=STATUS_SKIPPED,
+                    detail={"reason": "mime_filtered", "mime": mime, "mime_types": mime_types})
+                return False
 
         ctx = ActionContext(
             tenant=tenant, binding_id=binding_id,

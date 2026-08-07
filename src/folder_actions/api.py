@@ -220,6 +220,7 @@ def action_types(request: Request, ident: Identity = Depends(identity)) -> list[
 class BindingCreate(BaseModel):
     action_type: str
     on_events: list[str] = []
+    mime_types: list[str] = []       # binding-level content filter (empty => all)
     config: dict = {}
     recursive: bool = False
 
@@ -227,6 +228,7 @@ class BindingCreate(BaseModel):
 class BindingUpdate(BaseModel):
     action_type: Optional[str] = None
     on_events: Optional[list[str]] = None
+    mime_types: Optional[list[str]] = None
     config: Optional[dict] = None
     recursive: Optional[bool] = None
     enabled: Optional[bool] = None
@@ -264,8 +266,8 @@ def create_binding(folder_uid: str, request: Request, body: BindingCreate,
 
     binding = store.create_binding(
         ident.tenant, folder_uid=folder_uid, action_type=body.action_type,
-        on_events=body.on_events, config=clean_config, recursive=body.recursive,
-        created_by=ident.user)
+        on_events=body.on_events, mime_types=body.mime_types, config=clean_config,
+        recursive=body.recursive, created_by=ident.user)
     if secrets:
         _persist_secrets(request, ident.tenant, str(binding["id"]), secrets)
     return _scrub_binding(binding)
@@ -310,6 +312,8 @@ def update_binding(binding_id: str, request: Request, body: BindingUpdate,
         fields["action_type"] = body.action_type
     if body.on_events is not None:
         fields["on_events"] = body.on_events
+    if body.mime_types is not None:
+        fields["mime_types"] = body.mime_types
     if body.recursive is not None:
         fields["recursive"] = body.recursive
     if body.enabled is not None:

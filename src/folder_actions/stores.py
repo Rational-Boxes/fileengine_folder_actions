@@ -53,15 +53,16 @@ class Store:
     # ---------------- bindings ----------------
     def create_binding(self, tenant: str, *, folder_uid: str, action_type: str,
                         on_events: list[str], config: dict, recursive: bool = False,
-                        created_by: str = "") -> dict:
+                        mime_types: Optional[list[str]] = None, created_by: str = "") -> dict:
         conn = self._conn_t(tenant)
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO action_binding "
-                    "(folder_uid, recursive, action_type, on_events, config, created_by) "
-                    "VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
-                    (folder_uid, recursive, action_type, on_events, Json(config), created_by))
+                    "(folder_uid, recursive, action_type, on_events, mime_types, config, created_by) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (folder_uid, recursive, action_type, on_events, mime_types or [],
+                     Json(config), created_by))
                 out = _row(cur)
             conn.commit()
             return out
@@ -99,7 +100,7 @@ class Store:
             conn.close()
 
     def update_binding(self, tenant: str, binding_id: str, **fields) -> Optional[dict]:
-        allowed = {"recursive", "on_events", "config", "enabled", "action_type"}
+        allowed = {"recursive", "on_events", "mime_types", "config", "enabled", "action_type"}
         sets, vals = [], []
         for k, v in fields.items():
             if k not in allowed:

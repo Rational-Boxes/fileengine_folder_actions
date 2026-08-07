@@ -42,12 +42,15 @@ CREATE TABLE IF NOT EXISTS "{schema}".action_binding (
     recursive    boolean NOT NULL DEFAULT false,
     action_type  text NOT NULL,
     on_events    text[] NOT NULL DEFAULT '{{}}',
+    mime_types   text[] NOT NULL DEFAULT '{{}}',
     config       jsonb NOT NULL DEFAULT '{{}}'::jsonb,
     enabled      boolean NOT NULL DEFAULT true,
     created_by   text NOT NULL DEFAULT '',
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now()
 );
+-- Self-heal tenants provisioned before mime_types existed.
+ALTER TABLE "{schema}".action_binding ADD COLUMN IF NOT EXISTS mime_types text[] NOT NULL DEFAULT '{{}}';
 CREATE INDEX IF NOT EXISTS action_binding_folder_idx
     ON "{schema}".action_binding (folder_uid) WHERE enabled;
 

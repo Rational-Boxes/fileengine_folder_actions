@@ -35,7 +35,6 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ..mime import mime_matches
 from .base import ActionContext, ActionResult, FieldDescriptor, FieldOption, register
 
 log = logging.getLogger("folder_actions.plugins.webhook")
@@ -63,7 +62,6 @@ class WebhookAction:
     class ConfigModel(BaseModel):
         url: str
         auth: dict = {}                 # {type: bearer|oauth2_client_credentials, ...}
-        mime_types: list[str] = []      # firing whitelist (§7.4.1); empty => all
         context: dict[str, str] = {}    # admin-authored static context (§7.4.2)
         grant_read: bool = False        # mint scoped read-back token (v1: accepted, TODO)
         timeout_s: int = 10
@@ -99,12 +97,6 @@ class WebhookAction:
                             visible_when={"key": "auth_type",
                                           "equals": "oauth2_client_credentials"}),
             FieldDescriptor(
-                key="mime_types", label="MIME whitelist", type="multiselect",
-                options_source="mime_catalog",
-                help="Only fire when the file's content-sniffed MIME matches. "
-                     "Supports exact types and trailing wildcards (image/*). "
-                     "Empty means fire on all types."),
-            FieldDescriptor(
                 key="context", label="Custom context", type="group",
                 help="Static key:values sent verbatim under the payload 'context' key.",
                 item_fields=[
@@ -132,15 +124,11 @@ class WebhookAction:
 
         file_uid = event.get("file_uid") or ""
 
-        # (a) MIME-type whitelist — fail-closed (§7.4.1).
+        # (a) Resolve the file's content-sniffed MIME for the payload (best-effort).
+        # The MIME *whitelist* is now a binding-level filter enforced by the consumer
+        # for any action (§7.4.1 generalized) — not re-implemented here.
         mime: Any = None
-        if config.mime_types:
-            mime = ctx.mime.resolve(file_uid) if file_uid else None
-            if mime is None:
-                return ActionResult.skipped("mime_unresolved")
-            if not mime_matches(mime, config.mime_types):
-                return ActionResult.skipped("mime_filtered", mime=mime)
-        elif file_uid:
+        if file_uid:
             try:
                 mime = ctx.mime.resolve(file_uid)
             except Exception:
