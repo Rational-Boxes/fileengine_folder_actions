@@ -19,8 +19,12 @@ webhook, or any plug-in action).
 **Goals**
 - Attach one or more **actions** to a virtual folder, keyed off recognized
   file-activity events on files within that folder.
-- Ship four built-in actions: **move on review approve/reject**, **notify user or
-  group**, **automatic sorter** (SmolDocBot classification), and **webhook call**.
+- Ship five built-in actions: **move on review approve/reject**, **notify user or
+  group**, **automatic sorter** (SmolDocBot classification), **webhook call**, and
+  **raise a review** (auto-request a review on an added file — chainable across
+  folders, §7.6).
+- Two **binding-level filters** apply to *every* action: the trigger **`on_events`**
+  and a content **MIME-type whitelist** (§5) — actions do not re-declare their own.
 - Make actions **extensible via an in-process plug-in mechanism** (§6): the four
   built-ins are themselves plug-ins registered through the same interface.
 - Fit the existing platform conventions exactly: Python/FastAPI service, trusted
@@ -113,10 +117,20 @@ file's current parent (via core `Stat`, cached) to test folder membership.
 ### 3.3 Loop avoidance
 
 folder_actions' own `Move`/`SetMetadata` operations generate `file.moved` /
-metadata events on the same stream. To avoid recursion:
-- Every action core-call is made as the folder_actions **service principal**
-  (§7.5); the consumer **ignores `file.moved` events whose `actor` is the service
-  principal**.
+metadata events on the same stream. To avoid runaway recursion **without breaking
+chains**:
+- Every action core-call is made as the folder_actions **service principal** (§7.5).
+- **Loop-safety is a plug-in manifest flag, not a hardcoded action.** Each plug-in
+  declares **`auto_moves`** (§6) — `True` if it moves (or re-emits events for) files
+  **unattended**, i.e. with no human gate between trigger and mutation (the sorter is
+  the canonical case). The consumer **short-circuits any `auto_moves` action on a
+  `file.moved` event whose `actor` is the service principal**, so such an action can
+  never cascade on folder_actions' own (or another action's) moves. Future plug-ins
+  that auto-move just set the flag and inherit the guard — no consumer change.
+- **Actions without the flag deliberately DO react to service-principal moves.** This
+  lets a file moved into a folder (e.g. by move-on-approve) trigger that folder's
+  `raise_review` — enabling **human-gated chains** across folders (§7.6). Such a
+  chain can't loop on its own because every hop waits on a human review decision.
 - Additionally, each intended mutation is recorded in `action_run` (§10) and a
   redelivered/self-generated event matching a completed run is a no-op.
 
@@ -182,7 +196,8 @@ A **binding** attaches one action to one folder. It is the unit of config.
   "folder_uid":    "uuid",          // the bound virtual folder
   "recursive":     false,           // apply to subtree? (§3.2)
   "action_type":   "sorter",        // plug-in type name (§6)
-  "on_events":     ["conversion.complete"], // recognized types this binding fires on
+  "on_events":     ["conversion.complete"], // binding-level trigger: recognized types this fires on
+  "mime_types":    ["application/pdf", "image/*"], // binding-level content filter; empty = all types
   "config":        { /* action-type-specific, validated by the plug-in schema */ },
   "enabled":       true,
   "created_by":    "alice",
@@ -190,6 +205,13 @@ A **binding** attaches one action to one folder. It is the unit of config.
 }
 ```
 
+- **Two binding-level filters apply to every action** — actions never re-declare
+  them: **`on_events`** (which recognized event types fire the binding) and
+  **`mime_types`** (a content whitelist). The consumer enforces both *before*
+  invoking the plug-in. `mime_types` is **content-sniffed and fail-closed** (§7.4.1
+  semantics, generalized): if set and the file's MIME can't be resolved or doesn't
+  match (exact type or trailing wildcard `image/*`), the run is skipped. Empty
+  `mime_types` = fire on all types.
 - **Multiple bindings per folder** are allowed (e.g. notify + sorter). They run
   independently; ordering between bindings on the same event is unspecified
   (each is idempotent).
@@ -220,6 +242,8 @@ Actions are **in-process Python plug-ins** discovered at startup.
       type_name: str                      # e.g. "sorter", "webhook"
       label: str                          # human name for the "add action" UI
       supported_events: set[str]          # recognized types this action may bind to
+      auto_moves: bool = False            # manifest loop-safety flag (§3.3): True if
+                                          # it moves files UNATTENDED (sorter, webhook)
       ConfigModel: type[pydantic.BaseModel]   # typed config; server-side validation
 
       @classmethod
@@ -228,6 +252,10 @@ Actions are **in-process Python plug-ins** discovered at startup.
       def execute(self, event: dict, config: ConfigModel,
                   ctx: ActionContext) -> ActionResult: ...
   ```
+  The **manifest** each plug-in publishes (`type_name`, `label`, `supported_events`,
+  **`auto_moves`**, and the `config_fields` form schema) is exposed at
+  `GET /action-types` — so the consumer's loop-guard (§3.3) and the frontend form are
+  both driven by declared metadata, never hardcoded per action.
 
 - **`ActionContext`** (dependency-injected, the plug-in's only capabilities):
   `core` (a `ManagedFiles` client bound to the **service principal**, §7.5),
@@ -329,10 +357,11 @@ third-party plug-in composed from these types is configurable out of the box.
 
 ### 7.2 Notify user or group
 
-- **Trigger:** any recognized event type listed in `on_events` (the spec's "on
-  any supported event type").
-- **Config:** `{ "recipients": ["alice", "role:editors"], "events": [...],
-  "template": "<optional kind/override>" }`.
+- **Trigger:** the binding's `on_events` (§5) — notify does not carry its own event
+  list.
+- **Config:** `{ "recipients": ["alice", "role:editors"], "template": "<template-id?>" }`.
+  `template` is an optional reference to a stored **event-notification email
+  template** (§7.2.1); blank uses the built-in default body.
 - **Behavior:** resolve recipients to email addresses —
   - a user → LDAP `mail` (fallback: the uid if it is an address);
   - a `role:<name>` → **all members** of the tenant role via
@@ -343,6 +372,22 @@ third-party plug-in composed from these types is configurable out of the box.
     best-effort. Email body deep-links to the file/version/thread in the SPA.
 - **De-dupe:** no self-notification (recipient == `actor` skipped), and
   per-`event_id` so redelivery does not re-mail.
+
+#### 7.2.1 Event-notification email templates
+
+Reusable, **tenant-level** email templates the notify action renders per event.
+Managed in-product under **System → Email templates → Event notifications** (§12),
+tenant-admin gated; a folder editor may only *select* one on a notify binding.
+
+- **Fields:** `name`, `subject`, `body_text`, `body_html`. subject/body carry
+  `{placeholder}` tokens substituted at send time: `{actor}`, `{event}`, `{name}`,
+  `{file_uid}`, `{version}`, `{tenant}`, `{folder_uid}`, `{link}` (SPA deep-link).
+- **Store + API:** `notify_template` table (§10); `GET/POST/PUT/DELETE
+  /notify-templates` — mutations tenant-admin, **`GET` (list) available to any
+  authenticated user** so the notify binding editor's template dropdown resolves.
+- The notify config's `template` field is a **`ref`** (`options_source:
+  notify_templates`) so the generic form renders a live dropdown; adding a template
+  reflects immediately (frontend shares a store, §12).
 
 ### 7.3 Automatic sorter (SmolDocBot classification)
 
@@ -424,7 +469,8 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
 
 ### 7.4 Webhook call
 
-- **Trigger:** any recognized event type in `on_events`.
+- **Trigger:** the binding's `on_events` (§5). Which file types fire it is the
+  binding's `mime_types` filter (§5) — both are binding-level, not webhook config.
 - **Config:**
   ```jsonc
   {
@@ -437,8 +483,6 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
       "token_url": "https://idp/token", "client_id": "…",
       "client_secret": "<secret>", "scopes": ["…"]
     },
-    "events": ["file.updated", "review.approved", ...],
-    "mime_types": ["application/pdf", "image/*"],  // optional whitelist (§7.4.1); empty = fire on all
     "context": { "project": "Acme Tower", "stage": "design-review" },  // arbitrary admin key:values (§7.4.2)
     "grant_read": true,        // mint a scoped READ token so the remote can fetch the file
     "timeout_s": 10, "max_retries": 5
@@ -561,6 +605,35 @@ for authoring and tuning them in-product — not only SmolDocBot YAML import:
   retries (`max_retries`); after exhaustion the run is marked `failed` and logged;
   the event is still `XACK`ed (a poison webhook must not block the stream).
   4xx (except 429) → no retry (caller misconfiguration), marked `failed`.
+- **Loop-safety:** the response's `move_to` is an **unattended** move, so webhook
+  declares **`auto_moves = True`** (§3.3) — it won't re-fire on folder_actions' own
+  moves.
+
+### 7.6 Raise a review (chainable)
+
+Automatically raise a **review request** on a newly-added file, assigned to
+specified reviewers — the building block for **action chains across folders**.
+
+- **Trigger:** the binding's `on_events` — typically the "file added" events
+  (`file.created`, `file.moved` into the folder; also `file.updated` /
+  `conversion.complete`).
+- **Config:** `{ "reviewers": ["bob", "role:legal"] }` — encoded principals; a
+  `role:<name>` expands to each member. Rendered by the generic form as a
+  `principal` picker.
+- **Behavior:** resolve reviewers (expand roles; drop the `actor` — no self-review;
+  dedupe), then POST `/files/{file_uid}/reviews` to the **discussion service**
+  (`DiscussionClient`, as the service principal) with the reviewers and the event's
+  `version`. The discussion service validates each reviewer holds READ (a `422`
+  error-marks any who don't → the run is `skipped: reviewers_no_access`). A transport
+  failure is `retryable`.
+- **Loop-safety:** raise_review does **not** move files and does **not** set
+  `auto_moves`, so it *does* react to service-principal moves — which is what makes
+  chains work.
+- **Chaining pattern:** folder A binds `raise_review` (on file added) + `move_review`
+  (approved→B, rejected→C). A file lands in A → a review is requested → a human
+  approves → `move_review` moves it to B → B's `raise_review` fires on the arrival →
+  the next review is requested, and so on. Every hop is human-gated, so the chain
+  advances only on real decisions and cannot loop on its own (§3.3).
 
 ---
 
@@ -621,11 +694,13 @@ folder_actions/
     config.py         # load_dotenv + Config(env)
     _client.py core_client.py             # fileengine client bootstrap + service-principal wrapper
     ldap_auth.py http_auth.py bridge_auth.py jwt_verify.py
+    classifier_io.py notify_templates_api.py  # classifier YAML + notify-template API
     consumer.py events.py                 # recognized-stream consume + folder matching
     matching.py                           # event → binding resolution (§3.2)
     plugins/                              # ActionPlugin registry + built-ins
-      base.py move_review.py notify.py sorter.py webhook.py
-    csai_client.py                        # extracted-text fetch
+      base.py move_review.py notify.py sorter.py webhook.py raise_review.py
+    csai_client.py discussion_client.py   # extracted-text fetch; raise-review POST
+    mime.py                               # content-sniff MIME resolver + whitelist match
     mailer.py directory.py                # SMTP + LDAP role/user → email
     secrets.py                            # webhook-secret encryption
     db.py schema.py store.py              # per-tenant Postgres
@@ -643,9 +718,10 @@ image; Ansible role `scripts/Ansible/roles/folder_actions/`.
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `action_binding` | one (folder, event, action) rule | `id, folder_uid, recursive, action_type, on_events[], config jsonb, enabled, created_by` |
+| `action_binding` | one (folder, event, action) rule | `id, folder_uid, recursive, action_type, on_events[], mime_types[], config jsonb, enabled, created_by` |
 | `classifier_set` / `classifier` / `classifier_term` | imported SmolDocBot classifier definitions | per `import_export.py` (`name`; `name`; `term, distance, weight`) |
 | `sorter_route` | per-binding routing over a classifier set | `binding_id, classification_name, threshold, destination_folder, priority` |
+| `notify_template` | reusable event-notification email templates (§7.2.1) | `id, name, subject, body_text, body_html, created_by` |
 | `webhook_secret` | encrypted webhook credentials | `binding_id, ciphertext` (AES via `FA_SECRET_KEY`) |
 | `action_run` | idempotency + execution log/audit | `event_id, binding_id, file_uid, version, status(done/failed/skipped), detail jsonb, ts` — **UNIQUE (event_id, binding_id)** |
 
@@ -718,11 +794,15 @@ not an inline drawer form. The surfaces needed:
      `grant_read` + default read-back `format`, timeout / retries. **Secret fields
      are write-only** — entered once, never rendered back (§11).
 
-3. **Classifier set editor (modal overlay)** (§7.3.1) — a **tenant-level admin**
-   surface (sets are reused across folders, so it lives in settings/admin, not under
-   one folder). The richest editor of all — classifications, terms, wildcards,
-   import/export, and the live test panel — so it warrants a **full modal overlay**
-   (or dedicated full-page view), not a drawer form:
+   The binding editor also carries the **binding-level filters** (§5): the
+   **Trigger on events** checklist and a **MIME types** list-management field
+   (add/remove entries, exact or `image/*` wildcards) — both apply to any action.
+   For the notify action the **Email template** field is a live dropdown of stored
+   templates (§7.2.1) that updates as templates are added (shared store).
+
+3. **Classifier set editor** (§7.3.1) — a **tenant-level admin** surface (sets are
+   reused across folders). *As built* it is a **tab in the System configuration hub**
+   (see below), not under one folder:
    - List / create / rename / delete sets.
    - Edit classifications and terms (term string, `distance`, `weight`, with inline
      help for the `*` / `?` / `#` wildcards).
@@ -740,6 +820,15 @@ not an inline drawer form. The surfaces needed:
 
 5. **Reused pickers.** The destination **folder picker** and **user/role picker**
    (LDAP directory) several forms above depend on; likely already present in the SPA.
+
+6. **Admin navigation (as built).** Tenant-level configuration is consolidated into a
+   tabbed **System** hub (`/admin/ops`) and a **Security** hub (`/admin/security`),
+   so it isn't scattered under Users & Roles:
+   - **System configuration** — tabs: *Storage & sync · Integrations · Classifier
+     sets · Email templates*. The **Email templates** tab has two sub-areas:
+     **Account** (user/account templates from `ldap_manager`) and **Event
+     notifications** (the notify templates, §7.2.1) — both under one interface.
+   - **Security** — tabs: *Audit · Security · Events* (moved out of Users & Roles).
 
 **Related dependency (discussion-service UI).** The move-on-review action needs the
 review UI (owned by discussion / frontend) to expose explicit **Approve** /

@@ -141,6 +141,10 @@ class Config:
         self.csai_base_url = _env("FA_CSAI_BASE_URL", "http://localhost:8092")
         self.csai_timeout_s = _int("FA_CSAI_TIMEOUT_S", 30)
 
+        # --- discussion (raise_review action) ---
+        self.discuss_base_url = _env("FA_DISCUSS_BASE_URL", "http://localhost:8094")
+        self.discuss_timeout_s = _int("FA_DISCUSS_TIMEOUT_S", 15)
+
         # --- Plug-ins + webhook secret box ---
         self.enabled_actions = {a.strip() for a in _env("FA_ENABLED_ACTIONS", "").split(",") if a.strip()}
         self.secret_key = _env("FA_SECRET_KEY", "")   # Fernet/AES key for webhook secrets at rest

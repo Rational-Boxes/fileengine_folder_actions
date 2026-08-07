@@ -27,17 +27,25 @@ the shared `fileengine:events` stream. folder_actions degrades gracefully withou
 ## What it does
 
 An admin binds one or more actions to a folder; the consumer reacts to the recognized
-event stream. Four built-in actions (each an in-process plug-in — extend via the
+event stream. Five built-in actions (each an in-process plug-in — extend via the
 `folder_actions.actions` entry-point group, §6):
 
 - **Move on review approve/reject** — move a file when its review is approved/rejected.
-- **Notify user or group** — real-time email to users / role members on any event.
+- **Notify user or group** — real-time email to users / role members, optionally
+  rendered from a reusable event-notification template.
 - **Automatic sorter** — classify a file from its extracted Markdown (the vendored,
   deterministic SmolDocBot scorer) and move it to a destination by score threshold; a
   bound folder becomes an **inbox** (move a file in → auto-filed).
-- **Webhook** — POST to a remote (bearer / OAuth2 client-credentials), with a
-  content-sniffed MIME whitelist, an admin-authored context bag, and a `move_to` /
-  `metadata` response contract; optional scoped read-back of file content/renditions.
+- **Webhook** — POST to a remote (bearer / OAuth2 client-credentials), with an
+  admin-authored context bag and a `move_to` / `metadata` response contract; optional
+  scoped read-back of file content/renditions.
+- **Raise a review** — auto-request a review on an added file to specified reviewers;
+  composes with move-on-approve/reject into **chains across folders**.
+
+Every binding carries two **binding-level filters** applied to any action — the
+trigger `on_events` and a content-sniffed **MIME-type whitelist**. Plug-ins that move
+files unattended (sorter, webhook) declare **`auto_moves`** in their manifest so the
+consumer guards them against move loops.
 
 ## How it works
 

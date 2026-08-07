@@ -16,9 +16,10 @@
 """Built-in folder-action plug-ins (SPECIFICATIONS.md §7).
 
 Importing this package imports each built-in module for its ``@register`` side
-effect, so ``move_review`` / ``notify`` / ``sorter`` / ``webhook`` are present in the
-plug-in registry (base._REGISTRY) at startup. Third-party plug-ins register instead
-through the ``folder_actions.actions`` entry-point group (base.load_entrypoint_plugins)."""
+effect, so ``move_review`` / ``notify`` / ``sorter`` / ``webhook`` / ``raise_review`` are
+present in the plug-in registry (base._REGISTRY) at startup. Third-party plug-ins
+register instead through the ``folder_actions.actions`` entry-point group
+(base.load_entrypoint_plugins)."""
 from __future__ import annotations
 
-from . import move_review, notify, sorter, webhook  # noqa: F401
+from . import move_review, notify, raise_review, sorter, webhook  # noqa: F401

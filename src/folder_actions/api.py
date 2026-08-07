@@ -211,6 +211,7 @@ def action_types(request: Request, ident: Identity = Depends(identity)) -> list[
             "label": cls.label,
             "description": description,
             "supported_events": sorted(cls.supported_events),
+            "auto_moves": bool(getattr(cls, "auto_moves", False)),  # manifest: loop-safety (§3.3)
             "fields": [f.model_dump() for f in cls.config_fields()],
         })
     return out

@@ -42,6 +42,7 @@ if TYPE_CHECKING:  # avoid import cycles; these are duck-typed at runtime
     from ..core_client import CoreClient
     from ..csai_client import CsaiClient
     from ..directory import Directory
+    from ..discussion_client import DiscussionClient
     from ..mailer import SmtpMailer
     from ..mime import MimeResolver
     from ..secrets import SecretBox
@@ -149,6 +150,7 @@ class ActionContext:
     core: "CoreClient"
     csai: "CsaiClient"
     directory: "Directory"
+    discussion: "DiscussionClient"
     mailer: "SmtpMailer"
     secrets: "SecretBox"
     mime: "MimeResolver"
@@ -167,6 +169,15 @@ class ActionPlugin(Protocol):
     label: ClassVar[str]
     supported_events: ClassVar[frozenset[str]]
     ConfigModel: ClassVar[type[BaseModel]]
+
+    # Loop-safety flag (§3.3). Set True for actions that move (or otherwise re-emit
+    # events for) files **unattended** — i.e. with no human gate between the trigger
+    # and the mutation (the sorter is the canonical example). The consumer then
+    # short-circuits such an action on `file.moved` events actored by the service
+    # principal, so it can never cascade on folder_actions' own moves. Actions whose
+    # mutations are human-gated (e.g. raise_review → a person approves → move) leave
+    # this False so they can participate in chains. Defaults to False when absent.
+    auto_moves: ClassVar[bool] = False
 
     @classmethod
     def config_fields(cls) -> list[FieldDescriptor]: ...

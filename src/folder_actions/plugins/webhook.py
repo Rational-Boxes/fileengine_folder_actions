@@ -55,6 +55,9 @@ class WebhookAction:
     type_name = "webhook"
     label = "Webhook call"
     supported_events = SUPPORTED
+    # The remote's response may `move_to` a folder — an unattended move that could
+    # cascade if it fired on service-principal moves (§3.3). Flag it loop-safe.
+    auto_moves = True
 
     # Process-lifetime OAuth2 client-credentials token cache: key -> (token, expiry_ts).
     _oauth_cache: dict[str, tuple[str, float]] = {}

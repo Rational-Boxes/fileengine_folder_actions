@@ -30,6 +30,7 @@ from pydantic import ValidationError
 
 from .config import Config, load_dotenv
 from .core_client import CoreClient, service_actor
+from .discussion_client import DiscussionClient
 from .csai_client import CsaiClient
 from .directory import Directory
 from .events import RedisEventSource
@@ -59,7 +60,8 @@ class EventConsumer:
     injected (for tests) or are built from ``config`` by default."""
 
     def __init__(self, config: Config, store: Store, *, core=None, csai=None,
-                 directory=None, mailer=None, secrets=None, mime=None) -> None:
+                 directory=None, mailer=None, secrets=None, mime=None,
+                 discussion=None) -> None:
         self.config = config
         self.store = store
         self.core = core or CoreClient(config)
@@ -68,6 +70,7 @@ class EventConsumer:
         self.mailer = mailer or SmtpMailer(config)
         self.secrets = secrets or SecretBox(config.secret_key)
         self.mime = mime or MimeResolver(self.core)
+        self.discussion = discussion or DiscussionClient(config)
         self.service_actor = service_actor(config)
 
     # ------------------------------------------------------------------ dispatch
@@ -85,10 +88,9 @@ class EventConsumer:
             log.debug("ignoring rendition event %s (%s)", event_id, event_type)
             return False
 
-        # (2) Loop avoidance: ignore our own service-principal moves (§3.3).
-        if event_type == "file.moved" and event.get("actor") == self.service_actor:
-            log.debug("ignoring self-generated move %s by service principal", event_id)
-            return False
+        # (2) Loop avoidance is now applied per-binding to the auto-moving sorter only
+        # (see _run_binding) — other actions may react to service-principal moves so
+        # human-gated chains (raise_review -> approve -> move -> raise_review) work.
 
         tenant = event.get("tenant") or "default"
         try:
@@ -135,6 +137,18 @@ class EventConsumer:
                 detail={"reason": "unknown_action_type", "action_type": action_type})
             return False
 
+        # Loop avoidance (§3.3), from the plug-in manifest: an action that moves files
+        # UNATTENDED (declares auto_moves=True, e.g. the sorter) must not re-fire on
+        # folder_actions' own moves, or it could cascade with no human gate. Actions
+        # without the flag DO react to service-principal moves, enabling human-gated
+        # chains (raise_review -> approve -> move_review -> next folder's raise_review).
+        if (getattr(plugin_cls, "auto_moves", False)
+                and event.get("type") == "file.moved"
+                and event.get("actor") == self.service_actor):
+            log.debug("auto-moving action %s (%s) skips self-generated move %s",
+                      action_type, binding_id, event_id)
+            return False
+
         # Server-side config validation stays authoritative (§6.1).
         try:
             cfg_model = plugin_cls.ConfigModel.model_validate(binding.get("config") or {})
@@ -166,8 +180,8 @@ class EventConsumer:
             tenant=tenant, binding_id=binding_id,
             folder_uid=binding.get("folder_uid") or "",
             core=self.core, csai=self.csai, directory=self.directory,
-            mailer=self.mailer, secrets=self.secrets, mime=self.mime,
-            store=self.store, config=self.config, log=log)
+            discussion=self.discussion, mailer=self.mailer, secrets=self.secrets,
+            mime=self.mime, store=self.store, config=self.config, log=log)
 
         try:
             result = plugin_cls().execute(event, cfg_model, ctx)

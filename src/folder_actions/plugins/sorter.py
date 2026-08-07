@@ -38,6 +38,8 @@ class SorterAction:
     type_name = "sorter"
     label = "Automatic sorter"
     supported_events = frozenset({"conversion.complete", "file.moved"})
+    # Moves files unattended (no human gate) -> must not re-fire on its own moves (§3.3).
+    auto_moves = True
 
     class ConfigModel(BaseModel):
         # The reusable classifier set to score against; the per-folder routing table
