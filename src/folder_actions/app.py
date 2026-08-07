@@ -108,8 +108,10 @@ def build_app(config: Config | None = None, *, store: Store | None = None,
 
     from .api import router as api_router
     from .classifier_api import router as classifier_router
+    from .notify_templates_api import router as notify_templates_router
     app.include_router(api_router)
     app.include_router(classifier_router)
+    app.include_router(notify_templates_router)
     return app
 
 

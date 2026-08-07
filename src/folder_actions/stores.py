@@ -239,6 +239,73 @@ class Store:
         finally:
             conn.close()
 
+    # ---------------- notify templates ----------------
+    def create_notify_template(self, tenant: str, *, name: str, subject: str = "",
+                               body_text: str = "", body_html: str = "",
+                               created_by: str = "") -> dict:
+        conn = self._conn_t(tenant)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO notify_template (name, subject, body_text, body_html, created_by) "
+                    "VALUES (%s,%s,%s,%s,%s) RETURNING *",
+                    (name, subject, body_text, body_html, created_by))
+                out = _row(cur)
+            conn.commit()
+            return out
+        finally:
+            conn.close()
+
+    def list_notify_templates(self, tenant: str) -> list[dict]:
+        conn = self._conn_t(tenant, readonly=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, name, subject, created_by, created_at, updated_at "
+                            "FROM notify_template ORDER BY name")
+                return _rows(cur)
+        finally:
+            conn.close()
+
+    def get_notify_template(self, tenant: str, template_id: str) -> Optional[dict]:
+        conn = self._conn_t(tenant, readonly=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM notify_template WHERE id = %s", (template_id,))
+                return _row(cur)
+        finally:
+            conn.close()
+
+    def update_notify_template(self, tenant: str, template_id: str, **fields) -> Optional[dict]:
+        allowed = {"name", "subject", "body_text", "body_html"}
+        sets, vals = [], []
+        for k, v in fields.items():
+            if k in allowed:
+                sets.append(f"{k} = %s"); vals.append(v)
+        if not sets:
+            return self.get_notify_template(tenant, template_id)
+        sets.append("updated_at = now()")
+        conn = self._conn_t(tenant)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE notify_template SET {', '.join(sets)} WHERE id = %s RETURNING *",
+                            (*vals, template_id))
+                out = _row(cur)
+            conn.commit()
+            return out
+        finally:
+            conn.close()
+
+    def delete_notify_template(self, tenant: str, template_id: str) -> bool:
+        conn = self._conn_t(tenant)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM notify_template WHERE id = %s", (template_id,))
+                n = cur.rowcount
+            conn.commit()
+            return n > 0
+        finally:
+            conn.close()
+
     # ---------------- webhook secrets ----------------
     def put_secret(self, tenant: str, binding_id: str, ciphertext: bytes) -> None:
         conn = self._conn_t(tenant)

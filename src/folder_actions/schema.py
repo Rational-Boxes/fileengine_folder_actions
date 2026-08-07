@@ -93,6 +93,20 @@ CREATE TABLE IF NOT EXISTS "{schema}".webhook_secret (
     ciphertext  bytea NOT NULL
 );
 
+-- Reusable event-notification email templates (used by the notify action).
+-- subject/body carry placeholder tokens (in braces): actor, event, name,
+-- file_uid, version, tenant, folder_uid, link.
+CREATE TABLE IF NOT EXISTS "{schema}".notify_template (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        text NOT NULL,
+    subject     text NOT NULL DEFAULT '',
+    body_text   text NOT NULL DEFAULT '',
+    body_html   text NOT NULL DEFAULT '',
+    created_by  text NOT NULL DEFAULT '',
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
 -- Idempotency + execution log. One row per (event, binding).
 CREATE TABLE IF NOT EXISTS "{schema}".action_run (
     event_id    text NOT NULL,

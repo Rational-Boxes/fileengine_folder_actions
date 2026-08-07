@@ -68,9 +68,10 @@ class NotifyAction:
                      "Empty means every supported event.",
             ),
             FieldDescriptor(
-                key="template", label="Template", type="select", required=False,
-                options=[FieldOption(value="default", label="Default")],
-                help="Optional notification body override.",
+                key="template", label="Email template", type="ref", required=False,
+                options_source="notify_templates",
+                help="Optional event-notification email template (managed under "
+                     "System → Notification templates). Blank uses the built-in default.",
             ),
         ]
 
@@ -97,9 +98,21 @@ class NotifyAction:
 
         actor = (event.get("actor") or "").strip()
         file_uid = event.get("file_uid") or ""
-        subject = f"[{event.get('tenant', ctx.tenant)}] {etype}"
         deep_link = self._deep_link(ctx, event)
-        text, html = self._body(etype, event, deep_link)
+
+        # Render a configured template if set (managed under System > Notification
+        # templates), else the built-in default body.
+        tpl = None
+        if config.template:
+            try:
+                tpl = ctx.store.get_notify_template(ctx.tenant, config.template)
+            except Exception:
+                tpl = None
+        if tpl:
+            subject, text, html = self._render_template(tpl, etype, event, deep_link, ctx)
+        else:
+            subject = f"[{event.get('tenant', ctx.tenant)}] {etype}"
+            text, html = self._body(etype, event, deep_link)
 
         sent, seen = 0, set()
         skipped_self = 0
@@ -135,6 +148,38 @@ class NotifyAction:
         if version:
             return f"{base}/files/{file_uid}?version={version}"
         return f"{base}/files/{file_uid}"
+
+    @staticmethod
+    def _render_template(tpl: dict, etype: str, event: dict, link: str,
+                         ctx: ActionContext) -> tuple[str, str, str]:
+        """Substitute {placeholder} tokens in a stored template. Unknown tokens and
+        literal braces are left untouched (explicit token replace, not str.format)."""
+        values = {
+            "actor": event.get("actor") or "",
+            "event": etype or "",
+            "name": event.get("name") or event.get("file_uid") or "",
+            "file_uid": event.get("file_uid") or "",
+            "version": event.get("version") or "",
+            "tenant": event.get("tenant") or ctx.tenant or "",
+            "folder_uid": ctx.folder_uid or "",
+            "link": link or "",
+        }
+
+        def render(s: str) -> str:
+            for k, v in values.items():
+                s = s.replace("{" + k + "}", str(v))
+            return s
+
+        subject = render(tpl.get("subject") or f"[{values['tenant']}] {etype}")
+        text = render(tpl.get("body_text") or "")
+        html = render(tpl.get("body_html") or "")
+        if not text and not html:
+            # An empty template still sends something sensible.
+            line = f"{values['actor'] or 'someone'} triggered {etype} on {values['name']}."
+            text = f"{line}\n\n{link}" if link else line
+        if not html and text:
+            html = "<pre>" + text.replace("<", "&lt;") + "</pre>"
+        return subject, text, html
 
     @staticmethod
     def _body(etype: str, event: dict, link: str) -> tuple[str, str]:
