@@ -363,3 +363,35 @@ def folder_runs(folder_uid: str, request: Request, limit: int = 100,
         runs.extend(store.list_runs(ident.tenant, binding_id=str(b["id"]), limit=limit))
     runs.sort(key=lambda r: r.get("ts") or "", reverse=True)
     return runs[:limit]
+
+
+# ----------------------------- sorter routes -------------------------------
+# The sorter's routing table (classification -> threshold + destination + priority)
+# lives in sorter_route, separate from the binding config, so it is managed here.
+class RouteItem(BaseModel):
+    classifier_set_id: Optional[str] = None
+    classification_name: str
+    threshold: float = 0.0
+    destination_folder: str
+    priority: int = 0
+
+
+@router.get("/actions/{binding_id}/routes")
+def get_routes(binding_id: str, request: Request,
+               ident: Identity = Depends(identity)) -> list[dict]:
+    config: Config = request.app.state.config
+    store = request.app.state.store
+    binding = _load_binding(request, ident, binding_id)
+    _authorize_folder(config, ident, str(binding["folder_uid"]), "r")
+    return store.get_routes(ident.tenant, binding_id)
+
+
+@router.put("/actions/{binding_id}/routes")
+def set_routes(binding_id: str, request: Request, body: list[RouteItem],
+               ident: Identity = Depends(identity)) -> list[dict]:
+    config: Config = request.app.state.config
+    store = request.app.state.store
+    binding = _load_binding(request, ident, binding_id)
+    _authorize_folder(config, ident, str(binding["folder_uid"]), "w")
+    store.set_routes(ident.tenant, binding_id, [r.model_dump() for r in body])
+    return store.get_routes(ident.tenant, binding_id)
