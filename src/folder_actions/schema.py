@@ -59,9 +59,13 @@ CREATE TABLE IF NOT EXISTS "{schema}".classifier_set (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name        text NOT NULL,
     created_by  text NOT NULL DEFAULT '',
+    managed_by  text,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
+-- Externally-managed marker (provisioning §14a): when set, an integration owns this
+-- config; the admin UI warns that edits may be overwritten on the next sync.
+ALTER TABLE "{schema}".classifier_set ADD COLUMN IF NOT EXISTS managed_by text;
 CREATE TABLE IF NOT EXISTS "{schema}".classifier (
     id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     set_id    uuid NOT NULL REFERENCES "{schema}".classifier_set(id) ON DELETE CASCADE,
@@ -106,9 +110,12 @@ CREATE TABLE IF NOT EXISTS "{schema}".notify_template (
     body_text   text NOT NULL DEFAULT '',
     body_html   text NOT NULL DEFAULT '',
     created_by  text NOT NULL DEFAULT '',
+    managed_by  text,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
+-- Externally-managed marker (provisioning §14a), as on classifier_set above.
+ALTER TABLE "{schema}".notify_template ADD COLUMN IF NOT EXISTS managed_by text;
 
 -- Idempotency + execution log. One row per (event, binding).
 CREATE TABLE IF NOT EXISTS "{schema}".action_run (

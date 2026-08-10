@@ -41,6 +41,8 @@ class TemplateCreate(BaseModel):
     subject: str = ""
     body_text: str = ""
     body_html: str = ""
+    # Set by the provisioning service (§14a) to mark the template externally managed.
+    managed_by: Optional[str] = None
 
 
 class TemplateUpdate(BaseModel):
@@ -62,7 +64,8 @@ def create_template(request: Request, body: TemplateCreate,
                     ident: Identity = Depends(require_tenant_admin)) -> dict:
     return request.app.state.store.create_notify_template(
         ident.tenant, name=body.name, subject=body.subject,
-        body_text=body.body_text, body_html=body.body_html, created_by=ident.user)
+        body_text=body.body_text, body_html=body.body_html, created_by=ident.user,
+        managed_by=body.managed_by)
 
 
 @router.get("/notify-templates/{template_id}")
