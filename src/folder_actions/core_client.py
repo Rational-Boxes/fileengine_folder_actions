@@ -29,9 +29,68 @@ Two identities (SPECIFICATIONS.md §7.5, §11):
 from __future__ import annotations
 
 import contextvars
+import logging
 from typing import Optional
 
 from .ldap_auth import Identity, authenticate
+
+log = logging.getLogger("folder_actions.core_client")
+
+# Internal fileengine::Permission bit flags (file_engine_core acl_manager.h) mapped
+# to the proto Permission enum *name*. GetResourceAcls returns each rule's
+# ``permissions`` as this internal bitmask, but Grant/RevokePermission take a single
+# proto Permission enum — so a rule is copied bit-by-bit. These bit values are
+# wire/DB-stable (the stored ACL rows use them).
+_PERM_BIT_TO_NAME = {
+    0x0001: "EXECUTE",
+    0x0008: "RESTORE_TO_VERSION",
+    0x0010: "RETRIEVE_BACK_VERSION",
+    0x0020: "VIEW_VERSIONS",
+    0x0040: "UNDELETE",
+    0x0080: "LIST_DELETED",
+    0x0100: "DELETE",
+    0x0200: "WRITE",
+    0x0400: "READ",
+    0x0800: "MANAGE_ACL",
+    0x1000: "ACL_INHERIT",
+    0x2000: "CULL_VERSIONS",
+}
+
+
+def _prefixed_principal(principal: str, ptype: int) -> Optional[str]:
+    """Rebuild the Grant/Revoke principal string from a stored (principal, type).
+
+    The core strips the ``role:``/``claim:`` wire prefix at store time and records a
+    PrincipalType (0 user, 1 role, 2 group[reserved], 3 other, 4 claim); Grant/Revoke
+    re-derive the type from the prefix, so we re-attach it. OTHER ('everyone') is
+    matched by type and kept verbatim; the reserved GROUP type is never created by
+    the core, so we skip it (returns ``None``)."""
+    if ptype == 1:   # ROLE
+        return "role:" + principal
+    if ptype == 4:   # CLAIM (principal is the bare "key=value")
+        return "claim:" + principal
+    if ptype == 3:   # OTHER — the 'everyone' catch-all, matched by type
+        return principal
+    if ptype == 2:   # GROUP — reserved/unused, no grantable prefix
+        return None
+    return principal  # USER
+
+
+def _acl_atoms(acls: list[dict]) -> set[tuple[str, str, str]]:
+    """Explode ACL entry dicts into a set of ``(prefixed_principal, effect, perm_name)``
+    atoms — the unit Grant/Revoke operate on — so two ACLs can be diffed directly.
+    Unmappable principals (reserved GROUP) and any unknown bits are skipped."""
+    atoms: set[tuple[str, str, str]] = set()
+    for e in acls:
+        pp = _prefixed_principal(e.get("principal", ""), int(e.get("type", 0)))
+        if pp is None:
+            continue
+        effect = e.get("effect", "allow")
+        mask = int(e.get("permissions", 0))
+        for bit, name in _PERM_BIT_TO_NAME.items():
+            if mask & bit:
+                atoms.add((pp, effect, name))
+    return atoms
 
 # Request-scoped client IP (set by the HTTP middleware), forwarded for core audit.
 request_source_addr: "contextvars.ContextVar[str]" = contextvars.ContextVar(
@@ -114,9 +173,59 @@ class CoreClient:
         except Exception:
             return []
 
+    def get_resource_acls(self, uid: str) -> list[dict]:
+        """A resource's own explicit ACL rules (see client.get_resource_acls)."""
+        return list(self._client().get_resource_acls(uid, tenant=self.tenant) or [])
+
     # -- writes (as the service principal) --
-    def move(self, file_uid: str, destination_folder: str) -> bool:
-        return self._client().move(file_uid, destination_folder, tenant=self.tenant)
+    def move(self, file_uid: str, destination_folder: str, *, normalize: bool = True) -> bool:
+        """Move ``file_uid`` into ``destination_folder`` as the service principal.
+
+        When ``normalize`` (default), a moved file's permissions are normalized to
+        its new folder as a post-move followup (§7.7): the file keeps only the ACL
+        profile of its destination, not stale grants from where it came from. The
+        normalization is best-effort — it never fails or reverses a completed move
+        (the file has already moved and the ``file.moved`` event has fired)."""
+        ok = self._client().move(file_uid, destination_folder, tenant=self.tenant)
+        if ok and normalize:
+            try:
+                self.normalize_permissions(file_uid, destination_folder)
+            except Exception:
+                log.warning("permission normalization failed for %s -> %s (move kept)",
+                            file_uid, destination_folder, exc_info=True)
+        return ok
+
+    def grant_permission(self, uid: str, principal: str, permission, effect: str = "allow") -> bool:
+        return self._client().grant_permission(uid, principal, permission, effect=effect,
+                                               tenant=self.tenant)
+
+    def revoke_permission(self, uid: str, principal: str, permission, effect: str = "allow") -> bool:
+        return self._client().revoke_permission(uid, principal, permission, effect=effect,
+                                                tenant=self.tenant)
+
+    def normalize_permissions(self, file_uid: str, destination_folder: str) -> bool:
+        """Mirror mode (§7.7): make the moved file's OWN ACL a copy of its destination
+        folder's OWN ACL. Clears rules the file carried from its previous location and
+        adds the destination's — reconciled as a minimal diff so a rule already correct
+        on both (e.g. the service principal's MANAGE_ACL) is left untouched. Individual
+        grant/revoke failures are logged and skipped; the method is best-effort."""
+        target = _acl_atoms(self.get_resource_acls(destination_folder))
+        current = _acl_atoms(self.get_resource_acls(file_uid))
+        # Drop what the file carries that the destination profile doesn't have...
+        for principal, effect, perm in sorted(current - target):
+            try:
+                self.revoke_permission(file_uid, principal, perm, effect)
+            except Exception:
+                log.warning("normalize: revoke %s/%s/%s on %s failed",
+                            principal, perm, effect, file_uid, exc_info=True)
+        # ...and add the destination's rules the file is missing.
+        for principal, effect, perm in sorted(target - current):
+            try:
+                self.grant_permission(file_uid, principal, perm, effect)
+            except Exception:
+                log.warning("normalize: grant %s/%s/%s on %s failed",
+                            principal, perm, effect, file_uid, exc_info=True)
+        return True
 
     def set_metadata(self, uid: str, key: str, value: str) -> bool:
         return self._client().set_metadata_value(uid, key, str(value), tenant=self.tenant)

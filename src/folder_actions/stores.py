@@ -163,12 +163,13 @@ class Store:
             conn.close()
 
     # ---------------- classifier sets ----------------
-    def create_classifier_set(self, tenant: str, name: str, created_by: str = "") -> str:
+    def create_classifier_set(self, tenant: str, name: str, created_by: str = "",
+                              managed_by: Optional[str] = None) -> str:
         conn = self._conn_t(tenant)
         try:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO classifier_set (name, created_by) VALUES (%s,%s) "
-                            "RETURNING id", (name, created_by))
+                cur.execute("INSERT INTO classifier_set (name, created_by, managed_by) "
+                            "VALUES (%s,%s,%s) RETURNING id", (name, created_by, managed_by))
                 sid = cur.fetchone()[0]
             conn.commit()
             return str(sid)
@@ -201,7 +202,7 @@ class Store:
         conn = self._conn_t(tenant, readonly=True)
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, name, created_by, created_at, updated_at "
+                cur.execute("SELECT id, name, created_by, managed_by, created_at, updated_at "
                             "FROM classifier_set ORDER BY name")
                 return _rows(cur)
         finally:
@@ -213,7 +214,7 @@ class Store:
         conn = self._conn_t(tenant, readonly=True)
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, name FROM classifier_set WHERE id = %s", (set_id,))
+                cur.execute("SELECT id, name, managed_by FROM classifier_set WHERE id = %s", (set_id,))
                 head = _row(cur)
                 if head is None:
                     return None
@@ -243,14 +244,14 @@ class Store:
     # ---------------- notify templates ----------------
     def create_notify_template(self, tenant: str, *, name: str, subject: str = "",
                                body_text: str = "", body_html: str = "",
-                               created_by: str = "") -> dict:
+                               created_by: str = "", managed_by: Optional[str] = None) -> dict:
         conn = self._conn_t(tenant)
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO notify_template (name, subject, body_text, body_html, created_by) "
-                    "VALUES (%s,%s,%s,%s,%s) RETURNING *",
-                    (name, subject, body_text, body_html, created_by))
+                    "INSERT INTO notify_template (name, subject, body_text, body_html, created_by, managed_by) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (name, subject, body_text, body_html, created_by, managed_by))
                 out = _row(cur)
             conn.commit()
             return out
@@ -261,7 +262,7 @@ class Store:
         conn = self._conn_t(tenant, readonly=True)
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, name, subject, created_by, created_at, updated_at "
+                cur.execute("SELECT id, name, subject, created_by, managed_by, created_at, updated_at "
                             "FROM notify_template ORDER BY name")
                 return _rows(cur)
         finally:

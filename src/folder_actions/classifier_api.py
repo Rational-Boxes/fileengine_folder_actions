@@ -56,6 +56,8 @@ router = APIRouter()
 # -------------------------------- sets -------------------------------------
 class SetCreate(BaseModel):
     name: str
+    # Set by the provisioning service (§14a) to mark the set externally managed.
+    managed_by: Optional[str] = None
 
 
 class SetUpdate(BaseModel):
@@ -89,8 +91,8 @@ def list_sets(request: Request, ident: Identity = Depends(require_tenant_admin))
 def create_set(request: Request, body: SetCreate,
                ident: Identity = Depends(require_tenant_admin)) -> dict:
     set_id = request.app.state.store.create_classifier_set(
-        ident.tenant, body.name, created_by=ident.user)
-    return {"id": set_id, "name": body.name}
+        ident.tenant, body.name, created_by=ident.user, managed_by=body.managed_by)
+    return {"id": set_id, "name": body.name, "managed_by": body.managed_by}
 
 
 @router.get("/classifier-sets/{set_id}")

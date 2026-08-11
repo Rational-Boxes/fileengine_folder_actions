@@ -768,6 +768,31 @@ appropriately — the cleanest is a role with WRITE on the managed-folder subtre
 `system_admin` if it legitimately manages the whole tenant, though least-privilege is
 preferred).
 
+### 7.7 Permission normalization on move
+Every move an action performs (`CoreClient.move`, used by move-on-review, the sorter,
+and the webhook `move_to`) runs a **post-move followup** that normalizes the moved
+file's ACL to its destination folder — so a document does not carry stale grants from
+where it came from into a folder with a different access profile.
+
+- **Mode: mirror.** The file's **own** explicit ACL is made a copy of the destination
+  folder's **own** explicit ACL. It's reconciled as a minimal diff — read both ACLs
+  (`GetResourceAcls`), then revoke only the atoms the file has but the destination
+  doesn't and grant only those it's missing — so a rule already correct on both (e.g.
+  the service principal's `MANAGE_ACL`) is never churned. This is a point-in-time
+  snapshot: it does not track later changes to the folder's ACL, and is intentionally
+  partly redundant with the model's own parent-traversal inheritance.
+- **Granularity.** `GetResourceAcls` returns each rule's permissions as the internal
+  bitmask; Grant/Revoke take a single permission, so a rule is copied bit-by-bit, with
+  the `role:`/`claim:` principal prefix reconstructed from the stored PrincipalType
+  (the reserved `GROUP` type is skipped). ALLOW and DENY rules are mirrored faithfully.
+- **Best-effort, never reverses a move.** The move has already succeeded and its
+  `file.moved` event fired before normalization runs; a normalization failure (or any
+  individual grant/revoke) is logged and skipped, never failing or undoing the move.
+- **Rights.** Reading/replacing a resource's ACL requires `MANAGE_ACL`; the service
+  principal must therefore hold `MANAGE_ACL` on both the file and the destination folder
+  (satisfied by the managed-folder-subtree role of §7.5, or `system_admin`). Where it
+  lacks `MANAGE_ACL`, normalization is skipped best-effort and the move still stands.
+
 ---
 
 ## 12. Frontend UI surfaces (frontend repo)
