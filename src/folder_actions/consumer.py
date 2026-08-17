@@ -85,12 +85,16 @@ class EventConsumer:
         return self._core_cache[t]
 
     # ------------------------------------------------------------------ dispatch
-    def handle(self, event: dict) -> bool:
+    def handle(self, event: dict, *, collapse_on_content: bool = False) -> bool:
         """Process one event across all its matching bindings.
 
         Returns ``True`` if the entry should be left **un-acked** for redelivery
         (any binding produced a retryable, non-terminal result); ``False`` when the
-        event is fully resolved and may be acked."""
+        event is fully resolved and may be acked.
+
+        ``collapse_on_content`` adds the ``(file_uid, version)`` idempotency check on
+        top of the usual ``(event_id, binding_id)`` dedupe — used by the reconcile
+        sweep (§8), whose synthesized event ids never collide with the core's."""
         event_type = event.get("type") or ""
         event_id = event.get("event_id") or ""
 
@@ -114,7 +118,8 @@ class EventConsumer:
         redeliver = False
         for binding in bindings:
             try:
-                if self._run_binding(event, binding, tenant, event_id, core):
+                if self._run_binding(event, binding, tenant, event_id, core,
+                                     collapse_on_content=collapse_on_content):
                     redeliver = True
             except Exception:
                 # Isolation: one binding failing never aborts the loop (§6/§8).
@@ -125,7 +130,8 @@ class EventConsumer:
         return redeliver
 
     def _run_binding(self, event: dict, binding: dict, tenant: str,
-                     event_id: str, core: CoreClient) -> bool:
+                     event_id: str, core: CoreClient, *,
+                     collapse_on_content: bool = False) -> bool:
         """Run a single binding for an event. Returns ``True`` iff the run was a
         retryable (non-terminal) failure and the entry should not yet be acked.
         ``core`` is bound to the event's tenant (§3.2)."""
@@ -138,6 +144,17 @@ class EventConsumer:
         if self.store.run_exists(tenant, event_id, binding_id):
             log.debug("binding %s already ran for event %s (dedupe)", binding_id, event_id)
             return False
+
+        # Reconcile only: also collapse on content, so a file the live consumer
+        # already handled under the core's event id is not run a second time (§8).
+        # ``reconciled_since`` is the file's modified_at — see run_covers_file for
+        # why matching on version alone is not enough.
+        if collapse_on_content and file_uid:
+            if self.store.run_covers_file(tenant, binding_id, file_uid, version,
+                                          event.get("reconciled_since")):
+                log.debug("binding %s already covers %s@%s (content dedupe)",
+                          binding_id, file_uid, version)
+                return False
 
         plugin_cls = registry(self.config.enabled_actions or None).get(action_type)
         if plugin_cls is None:

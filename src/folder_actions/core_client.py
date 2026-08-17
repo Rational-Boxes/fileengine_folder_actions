@@ -150,6 +150,14 @@ class CoreClient:
     def parent_of(self, uid: str) -> str:
         return self.stat(uid).parent_uid
 
+    def listdir(self, uid: str) -> list:
+        """Direct children of a folder as ``DirectoryEntry`` objects (the reconcile
+        sweep's enumeration, §8). Soft-deleted entries are excluded — a deleted file
+        is not work to recover. Returns ``[]`` for an empty or unlistable folder;
+        ``dir()`` answers ``False`` for a non-directory, which normalizes to ``[]``."""
+        entries = self._client().dir(uid, tenant=self.tenant)
+        return list(entries) if entries else []
+
     def metadata(self, uid: str) -> dict:
         try:
             return self._client().get_metadata_values(uid, tenant=self.tenant)

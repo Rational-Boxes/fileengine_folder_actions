@@ -651,6 +651,26 @@ specified reviewers — the building block for **action chains across folders**.
 - **Reconcile sweep.** A periodic sweep (like CSAI/discussion) reconciles against
   core to recover events missed during a Redis outage or beyond stream retention
   (e.g. re-evaluate sorter routing for recently-converted files in bound folders).
+  It walks only the folders that have bindings — recursively where the binding is —
+  lists the files modified inside the sweep window, and re-drives them through the
+  *same* dispatch path as the live consumer, so MIME filters, config validation and
+  the loop guard all still apply.
+  - **State, not transitions.** Only `file.created`, `file.updated` and
+    `conversion.complete` are synthesized: a file present in a bound folder with a
+    version is evidence those happened. Core retains no retrospective record that a
+    move, rename, delete or review-decision occurred, so a binding listening solely
+    for those is outside what a sweep can recover — it is counted as
+    `bindings_unreconcilable` rather than silently ignored.
+  - **Idempotency.** Synthesized event ids are deterministic in
+    `(type, file_uid, version)`, so repeat sweeps collapse onto one `action_run`
+    row; dispatch additionally collapses on `(binding_id, file_uid, version)` so a
+    file the live consumer already handled under the core's own event id does not
+    run twice. A `retryable` outcome records no run and stays eligible.
+  - **Window.** Opens at the previous sweep's watermark minus
+    `FA_RECONCILE_OVERLAP_S`, clamped to `FA_RECONCILE_LOOKBACK_S` so a first sweep
+    (or one after a long outage) cannot walk unbounded history. The watermark
+    advances only on a sweep that was not truncated by `FA_RECONCILE_MAX_FILES`,
+    so a bounded sweep resumes rather than skipping the remainder.
 - **Fail-open, isolated.** A failing binding never blocks the loop or sibling
   bindings; failures are counted and surfaced on `/readyz`/metrics.
 - **Poison messages** (unparseable envelopes) are logged, counted, and acked.

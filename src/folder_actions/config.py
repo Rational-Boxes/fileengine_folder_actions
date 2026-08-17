@@ -161,7 +161,19 @@ class Config:
         # --- Consumer tuning ---
         self.consumer_name = _env("FA_CONSUMER_NAME", "worker-1")
         self.action_max_retries = _int("FA_ACTION_MAX_RETRIES", 5)
+
+        # --- Reconcile sweep (§8) ---
+        self.reconcile_enabled = _bool("FA_RECONCILE_ENABLED", True)
         self.reconcile_interval_s = _int("FA_RECONCILE_INTERVAL_S", 900)
+        # How far back a sweep looks. Normally the window starts at the previous
+        # sweep's watermark (minus an overlap, so a file modified mid-sweep isn't
+        # missed); after a long outage — or on the very first sweep — it is clamped
+        # to this maximum so one sweep can't walk an unbounded history.
+        self.reconcile_lookback_s = _int("FA_RECONCILE_LOOKBACK_S", 86400)
+        self.reconcile_overlap_s = _int("FA_RECONCILE_OVERLAP_S", 300)
+        # Bounds on one sweep's work, per tenant. Hitting either is logged, never silent.
+        self.reconcile_max_files = _int("FA_RECONCILE_MAX_FILES", 5000)
+        self.reconcile_max_depth = _int("FA_RECONCILE_MAX_DEPTH", 32)
 
     # SmtpMailer (copied from discussion) reads ``digest_from``; alias it.
     @property

@@ -131,6 +131,19 @@ CREATE TABLE IF NOT EXISTS "{schema}".action_run (
 );
 CREATE INDEX IF NOT EXISTS action_run_binding_ts_idx ON "{schema}".action_run (binding_id, ts DESC);
 CREATE INDEX IF NOT EXISTS action_run_file_idx ON "{schema}".action_run (file_uid);
+-- The reconcile sweep collapses on content rather than event id (§8): "has this
+-- binding already run for this file at this version, under ANY event id?".
+CREATE INDEX IF NOT EXISTS action_run_content_idx
+    ON "{schema}".action_run (binding_id, file_uid, version);
+
+-- Reconcile watermark (§8). One row per tenant schema: the start time of the last
+-- sweep that completed. The next sweep's window opens there (minus an overlap), so
+-- a Redis outage longer than stream retention is still recovered — bounded by
+-- FA_RECONCILE_LOOKBACK_S. Absent row => first sweep, clamped to the lookback.
+CREATE TABLE IF NOT EXISTS "{schema}".reconcile_state (
+    id             smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    last_swept_at  timestamptz NOT NULL DEFAULT now()
+);
 '''
 
 

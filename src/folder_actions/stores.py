@@ -332,6 +332,49 @@ class Store:
         finally:
             conn.close()
 
+    # ---------------- tenants ----------------
+    def list_tenants(self) -> list[str]:
+        """Every tenant this service has provisioned, derived from the schema list.
+
+        The schema *is* the tenant (schema.py), so ``tenant_<slug>`` schemas are the
+        authoritative set for a service-wide job like the reconcile sweep — there is
+        no tenant registry table. Note ``schema_name`` is lossy (it replaces unsafe
+        characters with ``_``), so the slug is what round-trips back through it, not
+        necessarily the original LDAP tenant string."""
+        conn = self._conn(readonly=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT schema_name FROM information_schema.schemata "
+                    "WHERE schema_name LIKE 'tenant\\_%' ORDER BY schema_name")
+                return [r[0][len("tenant_"):] for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # ---------------- reconcile watermark ----------------
+    def get_reconcile_watermark(self, tenant: str):
+        """When the last completed sweep for this tenant started (or ``None``)."""
+        conn = self._conn_t(tenant, readonly=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT last_swept_at FROM reconcile_state WHERE id = 1")
+                r = cur.fetchone()
+                return r[0] if r else None
+        finally:
+            conn.close()
+
+    def set_reconcile_watermark(self, tenant: str, when) -> None:
+        conn = self._conn_t(tenant)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO reconcile_state (id, last_swept_at) VALUES (1, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET last_swept_at = EXCLUDED.last_swept_at",
+                    (when,))
+            conn.commit()
+        finally:
+            conn.close()
+
     # ---------------- action_run (idempotency + log) ----------------
     def run_exists(self, tenant: str, event_id: str, binding_id: str) -> bool:
         conn = self._conn_t(tenant, readonly=True)
@@ -339,6 +382,47 @@ class Store:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM action_run WHERE event_id = %s AND binding_id = %s",
                             (event_id, binding_id))
+                return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+    def run_covers_file(self, tenant: str, binding_id: str, file_uid: str,
+                        version: str, since=None) -> bool:
+        """Has ``binding_id`` already done this file's work, under *any* event id?
+
+        The reconcile sweep's idempotency guard (§8). Event-id dedupe cannot serve
+        there: the sweep synthesizes its own event ids, so it never collides with the
+        live consumer's core-published ones and every recovered file would run twice.
+
+        Two ways a run counts as covering the file:
+
+        - **Same version** — the §8 ``(file_uid, version)`` content collapse.
+        - **Ran after the file last changed** (``since`` = the file's ``modified_at``).
+          Version equality alone is *not* sufficient, and assuming it was is a real
+          double-run bug: a core ``file.created`` event carries an EMPTY version (the
+          file has no content yet), while the sweep stamps the version it reads back
+          from ``stat`` — so the keys never match and the action fires a second time.
+          "A run already happened after the last modification" is the invariant that
+          actually holds, independent of how each path fills in ``version``.
+
+        Biased toward re-firing: if ``since`` is unknown the time clause is dropped,
+        because a spurious repeat (bounded by the deterministic event id) is cheaper
+        than silently dropping work the sweep exists to recover."""
+        clauses = ["binding_id = %s", "file_uid = %s"]
+        params: list[Any] = [binding_id, file_uid]
+        covered = ["version = %s"]
+        params.append(version)
+        if since is not None:
+            covered.append("ts >= %s")
+            params.append(since)
+        clauses.append("(" + " OR ".join(covered) + ")")
+
+        conn = self._conn_t(tenant, readonly=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT 1 FROM action_run WHERE {' AND '.join(clauses)} LIMIT 1",
+                    tuple(params))
                 return cur.fetchone() is not None
         finally:
             conn.close()
