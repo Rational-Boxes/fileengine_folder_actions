@@ -75,7 +75,7 @@ def build_app(config: Config | None = None, *, store: Store | None = None,
 
     @app.middleware("http")
     async def _guard_monitoring(request, call_next):
-        if _monitor_allow and request.url.path in {"/healthz", "/readyz", "/poolz"}:
+        if _monitor_allow and request.url.path in {"/healthz", "/readyz", "/poolz", "/metrics"}:
             client = request.client.host if request.client else ""
             if client not in _monitor_allow:
                 return _JSONResponse({"error": "forbidden"}, status_code=403)
@@ -112,6 +112,12 @@ def build_app(config: Config | None = None, *, store: Store | None = None,
     app.include_router(api_router)
     app.include_router(classifier_router)
     app.include_router(notify_templates_router)
+    # Prometheus scrape endpoint, guarded by the same allowlist as the other
+    # monitoring routes. Reports process and per-thread state so a stuck or
+    # leaking service is visible to the same scraper that watches the core.
+    from . import metrics as _fe_metrics
+    _fe_metrics.install(app, "folder_actions", [], {"version": str(__version__)})
+
     return app
 
 
