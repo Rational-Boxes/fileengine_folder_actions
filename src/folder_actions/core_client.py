@@ -165,15 +165,31 @@ class CoreClient:
             return {}
 
     def read_prefix(self, uid: str, n: int = 8192) -> bytes:
-        """First ``n`` bytes of the latest version — for content MIME sniffing (§7.4.1)."""
-        buf = self._client().get(uid, tenant=self.tenant)
+        """First ``n`` bytes of the latest version — for content MIME sniffing.
+
+        STREAMED, and stopped as soon as ``n`` bytes are in hand. The obvious
+        spelling — ``get(uid).read(n)`` — pulls the WHOLE file across the wire
+        and into memory before discarding all but the first few kilobytes, so
+        sniffing a 2 GiB upload cost 2 GiB of transfer and heap to look at 8 KB.
+
+        The core emits ~1 MiB chunks, so in practice this reads exactly one and
+        abandons the stream.
+        """
+        got = bytearray()
+        stream = self._client().get_stream(uid, tenant=self.tenant)
         try:
-            return buf.read(n)
+            for chunk in stream:
+                got.extend(chunk)
+                if len(got) >= n:
+                    break
         finally:
-            try:
-                buf.close()
-            except Exception:
-                pass
+            close = getattr(stream, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
+        return bytes(got[:n])
 
     def users_for_role(self, role: str) -> list[str]:
         try:
