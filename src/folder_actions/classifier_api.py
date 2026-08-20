@@ -196,6 +196,14 @@ def _read_file_text(config: Config, ident: Identity, file_uid: str) -> str:
     try:
         mf = client_for(ident, config)
         ok = bool(mf.check_permission(file_uid, "r", tenant=ident.tenant))
+        # AND existence: the core's CheckPermission evaluates ACL rules only,
+        # and read-by-default (`default_read_ = true`) grants when no rule
+        # matches -- which includes a uid that does not exist or has been
+        # soft-deleted, so the bare check says yes about something that is gone.
+        # Verified against a live core, 2026-08-20. One extra RPC, on the
+        # granted path only.
+        if ok:
+            ok = bool(mf.entity_exists(file_uid))
     except Exception:
         log.warning("read permission check failed for %s", file_uid, exc_info=True)
         ok = False

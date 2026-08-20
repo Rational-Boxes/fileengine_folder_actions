@@ -131,6 +131,14 @@ def _authorize_folder(config: Config, ident: Identity, folder_uid: str, perm: st
     try:
         mf = client_for(ident, config)
         ok = bool(mf.check_permission(folder_uid, perm, tenant=ident.tenant))
+        # AND existence: the core's CheckPermission evaluates ACL rules only,
+        # and read-by-default (`default_read_ = true`) grants when no rule
+        # matches -- which includes a uid that does not exist or has been
+        # soft-deleted, so the bare check says yes about something that is gone.
+        # Verified against a live core, 2026-08-20. One extra RPC, on the
+        # granted path only.
+        if ok:
+            ok = bool(mf.entity_exists(folder_uid))
     except Exception:
         log.warning("folder permission check failed for %s on %s", perm, folder_uid,
                     exc_info=True)
