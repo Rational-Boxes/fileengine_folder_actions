@@ -23,6 +23,7 @@ and naturally scoped to one tenant.
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 from .config import Config
@@ -82,25 +83,39 @@ def provision_tenant(config: Config, tenant: str) -> str:
 
 
 # Tenants whose schema has been ensured in this process.
+#
+# The lock is not optional — provisioning is check-then-act, and sync handlers
+# run on an anyio worker pool, so concurrent requests can pass the membership
+# check together and then run the same CREATE/ALTER statements in separate
+# transactions. Postgres breaks the resulting lock cycle with DeadlockDetected,
+# surfacing as an intermittent 500 on a read that changes no schema. (Diagnosed
+# in discussion_threaded_communication, which carried this code verbatim.)
 _provisioned: set[str] = set()
+_provision_lock = threading.Lock()
 
 
 def connect_for_tenant(config: Config, tenant: str, provision: bool = False, readonly: bool = False):
     """A connection whose ``search_path`` is the tenant's schema (then ``public``).
-    The schema is ensured on the first connection to a tenant in this process (and
-    whenever ``provision=True``). ``readonly=True`` routes reads to the replica during
-    a master outage and skips schema DDL."""
+    The schema is ensured once per tenant per process. ``readonly=True`` routes
+    reads to the replica during a master outage and skips schema DDL.
+
+    ``provision=True`` marks a caller that *requires* the tables rather than
+    merely reading them. It no longer forces the DDL to re-run: it used to,
+    which meant every caller passing it re-provisioned on EVERY call, so
+    idempotent-and-therefore-harmless DDL was running under every concurrent
+    request for the life of the process."""
     conn = connect(config, readonly=readonly)
     # Provision on demand — including read-only reads, so a tenant whose *first*
     # request is a dashboard/search read doesn't hit missing tables. Skip DDL only
     # when this connection is a read-only replica (a standby can't run it; the
     # master keeps the schema in sync).
     on_replica = readonly and getattr(config, "pg_replica_enabled", False)
-    if (provision or tenant not in _provisioned) and not on_replica:
-        name = ensure_tenant_schema(conn, tenant)
-        _provisioned.add(tenant)
-    else:
-        name = schema_name(tenant)
+    name = schema_name(tenant)
+    if tenant not in _provisioned and not on_replica:
+        with _provision_lock:
+            if tenant not in _provisioned:   # another thread may have just done it
+                ensure_tenant_schema(conn, tenant)
+                _provisioned.add(tenant)
     with conn.cursor() as cur:
         cur.execute(f'SET search_path TO "{name}", public')
         timeout = int(getattr(config, "db_statement_timeout_ms", 0) or 0)
