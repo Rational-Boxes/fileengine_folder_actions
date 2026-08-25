@@ -261,6 +261,40 @@ class EventConsumer:
         source.ensure_group()
         log.info("folder_actions consumer started (stream=%s group=%s consumer=%s)",
                  source.stream, source.group, source.consumer)
+
+        # Drain our own PEL FIRST. XREADGROUP with ">" returns only entries never
+        # delivered to the group, so anything this consumer had in flight when it
+        # last stopped is invisible to the loop below and stays pending forever —
+        # a restart during processing silently loses those events. The consumer
+        # name is stable, so reading id "0" hands them back to us.
+        #
+        # This is not hypothetical: a redeploy left three delivered-but-un-acked
+        # entries stranded, and the symptom was "folder actions are not firing"
+        # with a healthy-looking consumer sitting at lag 0.
+        try:
+            recovered = 0
+            while True:
+                pending = source.read_pending(count=32)
+                if not pending:
+                    break
+                for msg_id, event in pending:
+                    redeliver = False
+                    try:
+                        redeliver = self.handle(event)
+                    except Exception:
+                        log.exception("unhandled error replaying pending entry %s", msg_id)
+                        redeliver = False
+                    if not redeliver:
+                        source.ack([msg_id])
+                        recovered += 1
+            if recovered:
+                log.warning("folder_actions replayed %d entry(ies) stranded by a "
+                            "previous stop", recovered)
+        except Exception:
+            # Never let recovery keep the consumer from starting: new events
+            # matter more than old ones.
+            log.exception("folder_actions failed to drain pending entries; continuing")
+
         try:
             while True:
                 for msg_id, event in source.read(count=32, block_ms=5000):
