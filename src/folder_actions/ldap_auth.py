@@ -98,7 +98,11 @@ def _authenticate_against(uri: str, cfg, username: str, password: str) -> Identi
         raise _ServerUnreachable(uri) from e
 
     try:
-        svc.search(cfg.ldap_user_base, f"(uid={username})", search_scope=SUBTREE, attributes=["cn"])
+        # Match uid OR mail: the platform hands services an EMAIL as their
+        # identity (FILEENGINE_*_USER all come from fileengine_ldap_admin_email),
+        # so a uid-only filter matches nothing and the caller sees a flat 401
+        # indistinguishable from a wrong password.
+        svc.search(cfg.ldap_user_base, f"(|(uid={username})(mail={username}))", search_scope=SUBTREE, attributes=["cn"])
         if not svc.entries:
             return ident
         user_dn = svc.entries[0].entry_dn
