@@ -254,6 +254,59 @@ class Reconciler:
         log.info("reconcile(%s): %s (window from %s)", tenant, counts, since.isoformat())
         return counts
 
+    def replay_folder(self, tenant: str, folder_uid: str, *,
+                      since: datetime | None = None,
+                      recursive: bool | None = None) -> dict:
+        """Re-dispatch one folder's bindings over a window, on demand.
+
+        The scheduled sweep is watermark-driven: it covers what changed since the
+        last sweep and then advances the mark. That is right for catching drift,
+        and useless to someone standing in front of a folder whose actions did not
+        fire — the window has already moved past it.
+
+        So this takes an explicit window (default: the configured lookback) and
+        does NOT touch the watermark, because a manual replay is not evidence that
+        the scheduled sweep covered anything.
+
+        Idempotency is unchanged: dispatch still collapses on content, so a
+        binding that already resolved this file at this version is not run again.
+        That is the point — a replay picks up the work that never finished, and
+        does not re-move files or re-send notifications that already went out.
+        """
+        counts = {"folders": 0, "candidates": 0, "dispatched": 0, "errors": 0,
+                  "bindings_unreconcilable": 0, "truncated": 0}
+        bindings = [b for b in self.store.list_enabled_bindings(tenant)
+                    if b.get("folder_uid") == folder_uid]
+        if not bindings:
+            return counts
+
+        types, counts["bindings_unreconcilable"] = self._event_types_for(bindings)
+        if not types:
+            return counts
+
+        now = datetime.now(timezone.utc)
+        if since is None:
+            since = now - timedelta(seconds=int(self.config.reconcile_lookback_s))
+        if recursive is None:
+            recursive = any(b.get("recursive") for b in bindings)
+
+        core = self._core(tenant)
+        budget = [max(0, int(self.config.reconcile_max_files))]
+        counts["folders"] = 1
+        for f in self._changed_files(core, folder_uid, recursive, since, budget):
+            counts["candidates"] += 1
+            version = self._version_of(core, f["uid"])
+            for event_type in sorted(types):
+                if self._dispatch(tenant, event_type, f, version):
+                    counts["dispatched"] += 1
+                else:
+                    counts["errors"] += 1
+        if budget[0] <= 0:
+            counts["truncated"] += 1
+        log.info("replay(%s, %s): %s (window from %s)",
+                 tenant, folder_uid, counts, since.isoformat())
+        return counts
+
     def _dispatch(self, tenant: str, event_type: str, f: dict, version: str) -> bool:
         """Feed one synthesized event through the live dispatch path. ``False`` on an
         unexpected failure (already logged) — matching/plug-in outcomes are not errors."""

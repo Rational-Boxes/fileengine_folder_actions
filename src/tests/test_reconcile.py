@@ -354,3 +354,51 @@ def test_coverage_query_excludes_deferred_and_failed_runs():
     assert "status <> %s" in src, "a failed run still counts as coverage"
     assert "detail->>'reason'" in src, "a deferred run still counts as coverage"
     assert "UNFINISHED_SKIP_REASONS" in src
+
+
+# --- on-demand replay --------------------------------------------------------
+#
+# The scheduled sweep is watermark-driven, so by the time anyone notices that a
+# folder's actions did not fire, the window has moved past the file. Replay takes
+# an explicit window and leaves the watermark alone.
+
+def test_replay_covers_a_window_the_watermark_has_passed():
+    core = FakeCore(tree={"F": [Entry("a", modified_at=NOW - timedelta(hours=2))]})
+    store = FakeStore(bindings=[_binding()], watermark=NOW)   # sweep would skip it
+    r = _reconciler(store, core)
+
+    counts = r.replay_folder("default", "F", since=NOW - timedelta(hours=6))
+
+    assert counts["candidates"] == 1
+    assert counts["dispatched"] >= 1
+
+
+def test_replay_does_not_move_the_watermark():
+    """A manual replay is not evidence the scheduled sweep covered anything."""
+    core = FakeCore(tree={"F": [Entry("a", modified_at=NOW)]})
+    store = FakeStore(bindings=[_binding()])
+    _reconciler(store, core).replay_folder("default", "F", since=NOW - timedelta(hours=1))
+    assert store.marks == [], "replay advanced the watermark"
+
+
+def test_replay_only_touches_the_named_folder():
+    core = FakeCore(tree={"F": [Entry("a", modified_at=NOW)],
+                          "OTHER": [Entry("b", modified_at=NOW)]})
+    b1 = _binding()
+    b1["folder_uid"] = "F"
+    b2 = _binding()
+    b2["folder_uid"] = "OTHER"
+    store = FakeStore(bindings=[b1, b2])
+
+    counts = _reconciler(store, core).replay_folder(
+        "default", "F", since=NOW - timedelta(hours=1))
+
+    assert counts["folders"] == 1
+    assert "OTHER" not in core.listed
+
+
+def test_replay_on_a_folder_with_no_bindings_is_a_no_op():
+    core = FakeCore(tree={"F": [Entry("a", modified_at=NOW)]})
+    counts = _reconciler(FakeStore(bindings=[]), core).replay_folder(
+        "default", "F", since=NOW - timedelta(hours=1))
+    assert counts["candidates"] == 0 and counts["dispatched"] == 0
