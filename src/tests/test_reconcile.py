@@ -299,6 +299,30 @@ def test_sweep_once_covers_every_tenant_and_survives_one_failing():
 
     core = FakeCore(tree={"F": [Entry("a", modified_at=NOW)]})
     store = Boom(tenants=["good", "bad", "other"])
-    totals = _reconciler(store, core).sweep_once()
+    # now=NOW, as every other test here does. Without it sweep_once fell through
+    # to the real clock while the fixture entry stayed pinned at NOW, so the entry
+    # aged out of the 86400s lookback a day after this file was written and the
+    # test returned 0 candidates from then on.
+    totals = _reconciler(store, core).sweep_once(now=NOW)
     assert totals["candidates"] == 2          # good + other; bad raised
     assert {t for t, _ in store.marks} == {"good", "other"}
+
+
+def test_sweep_once_stamps_one_clock_for_every_tenant():
+    """The watermark each tenant advances to must be the instant the SWEEP began.
+
+    Per-tenant clocks would drift forward across a long sweep, so a tenant swept
+    late would advance past the point its own enumeration ran and the next sweep
+    would skip that gap."""
+    store = FakeStore(tenants=["a", "b", "c"], bindings=[_binding()])
+    _reconciler(store, FakeCore()).sweep_once(now=NOW)
+    assert {mark for _, mark in store.marks} == {NOW}
+
+
+def test_sweep_once_defaults_to_the_real_clock():
+    """The daemon calls it with no argument; injection must stay optional."""
+    store = FakeStore(tenants=["a"], bindings=[_binding()])
+    before = datetime.now(timezone.utc)
+    _reconciler(store, FakeCore()).sweep_once()
+    marks = [mark for _, mark in store.marks]
+    assert len(marks) == 1 and marks[0] >= before
