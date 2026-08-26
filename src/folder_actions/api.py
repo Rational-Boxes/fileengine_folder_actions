@@ -378,6 +378,50 @@ def folder_runs(folder_uid: str, request: Request, limit: int = 100,
     return runs[:limit]
 
 
+class ReplayRequest(BaseModel):
+    """Optional window override. Default: the configured reconcile lookback."""
+    since_seconds: Optional[int] = None
+    recursive: Optional[bool] = None
+
+
+@router.post("/folders/{folder_uid}/replay")
+async def replay_folder(folder_uid: str, request: Request,
+                        body: Optional[ReplayRequest] = None,
+                        ident: Identity = Depends(identity)) -> dict:
+    """Re-run this folder's actions over a window, on demand.
+
+    For the case the scheduled sweep cannot serve: an event that never fired, or
+    fired and left the work unfinished. The sweep is watermark-driven, so by the
+    time anyone notices, its window has moved past the file. This takes an
+    explicit window and does not touch the watermark.
+
+    Requires WRITE on the folder — it dispatches actions that move files and send
+    notifications, so read access is not enough to trigger it.
+
+    Idempotent in the same way the sweep is: dispatch collapses on content, so a
+    binding that already resolved a file at its current version is not run again.
+    Pressing this twice does not move a file twice.
+
+    Runs off the event loop: a replay walks the tree and can take seconds.
+    """
+    config: Config = request.app.state.config
+    store = request.app.state.store
+    _authorize_folder(config, ident, folder_uid, "w")
+
+    from .reconcile import Reconciler
+    body = body or ReplayRequest()
+    since = None
+    if body.since_seconds and body.since_seconds > 0:
+        from datetime import datetime, timedelta, timezone
+        since = datetime.now(timezone.utc) - timedelta(seconds=int(body.since_seconds))
+
+    counts = await run_in_threadpool(
+        Reconciler(config, store).replay_folder,
+        ident.tenant, folder_uid, since=since, recursive=body.recursive)
+    log.info("replay requested by %s for %s: %s", ident.user, folder_uid, counts)
+    return {"folder_uid": folder_uid, "counts": counts}
+
+
 # ----------------------------- sorter routes -------------------------------
 # The sorter's routing table (classification -> threshold + destination + priority)
 # lives in sorter_route, separate from the binding config, so it is managed here.
