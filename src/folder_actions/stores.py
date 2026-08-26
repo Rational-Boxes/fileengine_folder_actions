@@ -20,6 +20,16 @@ routes, encrypted webhook secrets, and the idempotent action_run log. All method
 open a short-lived connection via ``connect_for_tenant`` and commit before return."""
 from __future__ import annotations
 
+from .plugins.base import STATUS_FAILED, STATUS_SKIPPED
+
+#: Skip reasons that mean "not finished, come back" rather than "decided".
+#: A run recorded with one of these must NOT count as the reconcile sweep's
+#: coverage of the file, or the sweep cannot recover the very case it exists for:
+#: the sorter defers on file.moved when the text is not converted yet and waits
+#: for a conversion.complete that is not guaranteed to arrive.
+UNFINISHED_SKIP_REASONS = ("deferred_conversion",)
+
+
 from typing import Any, Optional
 
 from psycopg.types.json import Json
@@ -405,11 +415,25 @@ class Store:
           "A run already happened after the last modification" is the invariant that
           actually holds, independent of how each path fills in ``version``.
 
+        A run that deferred or failed does NOT count — see UNFINISHED_SKIP_REASONS.
+
         Biased toward re-firing: if ``since`` is unknown the time clause is dropped,
         because a spurious repeat (bounded by the deterministic event id) is cheaper
         than silently dropping work the sweep exists to recover."""
-        clauses = ["binding_id = %s", "file_uid = %s"]
-        params: list[Any] = [binding_id, file_uid]
+        # A run only COVERS the file if it actually resolved the work. A run that
+        # deferred — the sorter's "deferred_conversion", waiting on a
+        # conversion.complete that may never arrive — or that failed is precisely
+        # what the sweep exists to pick up, and counting it as coverage made the
+        # sweep unable to rescue the case it was built for. Five files sat in an
+        # inbox behind deferred runs the sweep kept treating as done.
+        #
+        # A terminal decision still covers: "no_match" means the classifier scored
+        # this version below threshold, which is an answer, not unfinished work.
+        clauses = ["binding_id = %s", "file_uid = %s",
+                   "status <> %s",
+                   "NOT (status = %s AND detail->>'reason' = ANY(%s))"]
+        params: list[Any] = [binding_id, file_uid,
+                             STATUS_FAILED, STATUS_SKIPPED, list(UNFINISHED_SKIP_REASONS)]
         covered = ["version = %s"]
         params.append(version)
         if since is not None:

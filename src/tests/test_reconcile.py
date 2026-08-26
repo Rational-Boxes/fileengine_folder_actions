@@ -326,3 +326,31 @@ def test_sweep_once_defaults_to_the_real_clock():
     _reconciler(store, FakeCore()).sweep_once()
     marks = [mark for _, mark in store.marks]
     assert len(marks) == 1 and marks[0] >= before
+
+
+# --- the sweep must retry work that never finished ---------------------------
+#
+# run_covers_file matched on (binding_id, file_uid, version) with no status
+# filter, so a run recorded as skipped/"deferred_conversion" counted as covered
+# and the sweep would never retry it. That is precisely the case the sweep exists
+# for: the sorter defers on file.moved when the text is not converted yet, and
+# the conversion.complete it waits for is not guaranteed to arrive.
+
+from folder_actions.stores import UNFINISHED_SKIP_REASONS
+
+
+def test_deferred_conversion_is_listed_as_unfinished():
+    assert "deferred_conversion" in UNFINISHED_SKIP_REASONS
+
+
+def test_coverage_query_excludes_deferred_and_failed_runs():
+    """The SQL is what enforces this, so assert on the SQL rather than mock a
+    database: coverage must filter on status, not only on file and version."""
+    import inspect
+
+    from folder_actions.stores import Store
+
+    src = inspect.getsource(Store.run_covers_file)
+    assert "status <> %s" in src, "a failed run still counts as coverage"
+    assert "detail->>'reason'" in src, "a deferred run still counts as coverage"
+    assert "UNFINISHED_SKIP_REASONS" in src
