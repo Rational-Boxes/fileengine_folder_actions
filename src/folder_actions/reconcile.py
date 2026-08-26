@@ -294,8 +294,19 @@ class Reconciler:
                         exc_info=True)
 
     # ------------------------------------------------------------------- sweep
-    def sweep_once(self) -> dict:
-        """Sweep every provisioned tenant. One tenant failing never stops the rest."""
+    def sweep_once(self, now: datetime | None = None) -> dict:
+        """Sweep every provisioned tenant. One tenant failing never stops the rest.
+
+        ``now`` is stamped once for the whole sweep rather than per tenant, and is
+        injectable for the same reason ``sweep_tenant`` takes it: without it this
+        was the only sweep entry point whose clock a test could not pin, and a
+        test that cannot pin the clock is a test that expires.
+
+        Stamping once is also the safer of the two: every tenant's watermark then
+        advances to the instant the sweep STARTED, never to a moment after its own
+        enumeration ran, so the next sweep re-covers a little rather than skipping
+        a window. Reconcile is idempotent, so re-covering costs nothing."""
+        now = now or datetime.now(timezone.utc)
         totals: dict[str, int] = {}
         try:
             tenants = self.store.list_tenants()
@@ -304,7 +315,7 @@ class Reconciler:
             return totals
         for tenant in tenants:
             try:
-                for k, v in self.sweep_tenant(tenant).items():
+                for k, v in self.sweep_tenant(tenant, now=now).items():
                     totals[k] = totals.get(k, 0) + v
             except Exception:
                 log.exception("reconcile: sweep failed for tenant %s", tenant)
