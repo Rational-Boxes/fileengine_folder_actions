@@ -32,6 +32,7 @@ from typing import Optional
 
 from .ldap_auth import Identity
 from .jwt_verify import identity_from_claims, verify_hs256
+from . import token_revocation
 
 
 class BridgeTokenVerifier:
@@ -54,6 +55,12 @@ class BridgeTokenVerifier:
         if self.jwt_secret:
             claims = verify_hs256(token, self.jwt_secret)
             if claims is None:
+                return None
+            # The bridge may have revoked this token since it signed it, and a
+            # stateless JWT cannot say so — the signature and exp still check out.
+            # Ask the shared denylist, or a signed-out token goes on working here
+            # after the bridge itself has begun refusing it.
+            if not token_revocation.permits(str(claims.get("jti") or "")):
                 return None
             got = identity_from_claims(claims, tenant)
             if got is None:
