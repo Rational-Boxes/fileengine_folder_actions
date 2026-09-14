@@ -66,6 +66,16 @@ def _is_admin(ident) -> bool:
     return bool({"administrators", "system_admin"} & set(ident.roles or []))
 
 
+
+def _auth_against(mod, cfg, user, pw, tenant):
+    """_authenticate_against takes a tenant in most copies; mcp pins its own."""
+    import inspect
+    sig = inspect.signature(mod._authenticate_against)
+    if "tenant" in sig.parameters:
+        return mod._authenticate_against("ldap://x", cfg, user, pw, tenant)
+    return mod._authenticate_against("ldap://x", cfg, user, pw)
+
+
 def _cfg(**kw):
     c = types.SimpleNamespace(
         ldap_tenant_base="ou=tenants,dc=x",
@@ -73,6 +83,7 @@ def _cfg(**kw):
         tenant="alpha",
         agent_user="",
         service_principals="",
+        ldap_service_base="",
         ldap_bind_dn="cn=svc",
         ldap_bind_password="pw",
     )
@@ -272,3 +283,52 @@ def test_bridge_verifier_refuses_a_foreign_tenant(monkeypatch):
     assert ok is not None and ok.user == "alice" and ok.tenant == "alpha"
     # Pre-fix: Identity(user='alice', roles=[], tenant='beta', authenticated=True)
     assert v.verify(tok, "beta") is None
+
+
+# --- a worker's own identity lives outside the user base --------------------
+
+def test_the_agent_is_found_in_the_service_base(monkeypatch):
+    """Service accounts live under ou=services so no user-facing query sees them.
+
+    Rosters, user search, mention resolution and the sign-in doors are all
+    rooted at ldap_user_base, so a machine account under a different ou is
+    invisible to them BY CONSTRUCTION. The cost is that this path has to be
+    told where to look.
+    """
+    cfg = _cfg(agent_user="svc-worker", ldap_service_base="ou=services,dc=x")
+
+    class _TwoBase(_FakeConn):
+        def __init__(self):
+            super().__init__({"ou=alpha,ou=tenants,dc=x": []})
+            self.searched = []
+
+        def search(self, base, filt, **kw):
+            self.searched.append(base)
+            if base.startswith("ou=services"):
+                e = _Entry("svc-worker")
+                e.entry_dn = "uid=svc-worker,ou=services,dc=x"
+                self.entries = [e]
+                return True
+            if base.startswith("ou=users"):
+                self.entries = []          # not a person; not there
+                return True
+            self.entries = []
+            return True
+
+    conn = _TwoBase()
+    monkeypatch.setattr(ldap_auth, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(ldap_auth, "Connection", lambda *a, **k: conn)
+
+    ident = _auth_against(ldap_auth, cfg, "svc-worker", "pw", "alpha")
+    assert ident.authenticated            # found, and exempt as a service principal
+    assert "ou=users,dc=x" in conn.searched      # user base is tried FIRST
+    assert "ou=services,dc=x" in conn.searched   # and the service base only after
+
+
+def test_without_a_service_base_nothing_extra_is_searched(monkeypatch):
+    cfg = _cfg(agent_user="svc-worker")   # ldap_service_base unset
+    conn = _FakeConn({})
+    monkeypatch.setattr(ldap_auth, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(ldap_auth, "Connection", lambda *a, **k: conn)
+    ident = _auth_against(ldap_auth, cfg, "nobody", "pw", "alpha")
+    assert not ident.authenticated

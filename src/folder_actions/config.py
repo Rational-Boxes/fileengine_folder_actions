@@ -100,6 +100,13 @@ class Config:
         self.ldap_replica_enabled = bool(self.ldap_uri_replica)
         self.ldap_domain = _env("FILEENGINE_LDAP_DOMAIN", "dc=rationalboxes,dc=com")
         self.ldap_user_base = _env("FILEENGINE_LDAP_USER_BASE", "ou=users,dc=rationalboxes,dc=com")
+        # Where THIS service's own identity lives. Separate from
+        # ldap_user_base on purpose: every user-facing lookup (rosters,
+        # search, mentions, the sign-in doors) is rooted at the user base,
+        # so a machine account under ou=services is invisible to all of
+        # them by construction rather than by a filter. Empty disables the
+        # lookup and the agent must then live under ldap_user_base.
+        self.ldap_service_base = _env("FILEENGINE_LDAP_SERVICE_BASE", "")
         self.ldap_tenant_base = _env("FILEENGINE_LDAP_TENANT_BASE", "ou=tenants,dc=rationalboxes,dc=com")
         self.ldap_bind_dn = _env("FILEENGINE_LDAP_BIND_DN", "cn=admin,dc=rationalboxes,dc=com")
         self.ldap_bind_password = _env("FILEENGINE_LDAP_BIND_PASSWORD", "admin")

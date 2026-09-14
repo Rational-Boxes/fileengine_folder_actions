@@ -106,7 +106,18 @@ def _authenticate_against(uri: str, cfg, username: str, password: str,
         # identity (FILEENGINE_*_USER all come from fileengine_ldap_admin_email),
         # so a uid-only filter matches nothing and the caller sees a flat 401
         # indistinguishable from a wrong password.
-        svc.search(cfg.ldap_user_base, f"(|(uid={username})(mail={username}))", search_scope=SUBTREE, attributes=["cn"])
+        # The user base first, then this service's own base. A worker's account
+        # lives under ou=services so that no user-facing query can see it; that
+        # makes it unresolvable here unless this path is told where to look.
+        bases = [cfg.ldap_user_base]
+        svc_base = getattr(cfg, "ldap_service_base", "") or ""
+        if svc_base:
+            bases.append(svc_base)
+        for b in bases:
+            svc.search(b, f"(|(uid={username})(mail={username}))",
+                       search_scope=SUBTREE, attributes=["cn"])
+            if svc.entries:
+                break
         if not svc.entries:
             return ident
         user_dn = svc.entries[0].entry_dn
