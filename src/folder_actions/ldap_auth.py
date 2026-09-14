@@ -122,14 +122,7 @@ def _authenticate_against(uri: str, cfg, username: str, password: str,
         # administrator everywhere once the caller stamped on the requested
         # tenant. Empty means not a member.
         roles = roles_in_tenant(svc, cfg, user_dn, tenant)
-        if not roles:
-            # Infrastructure identities are not tenant members and hold no
-            # tenant roles; they reach every tenant deliberately, and the core's
-            # ACL check remains their only authority over content.
-            if is_service_principal(cfg, username):
-                ident.roles = []
-                ident.authenticated = True
-                return ident
+        if not roles and not is_service_principal(cfg, username):
             return ident          # authenticated=False: bound, but not a member
 
         ident.roles = roles

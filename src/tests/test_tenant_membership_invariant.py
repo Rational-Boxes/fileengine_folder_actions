@@ -167,16 +167,39 @@ def test_bind_without_a_group_in_the_tenant_is_not_authenticated(monkeypatch):
     assert not denied.authenticated
 
 
-def test_service_principal_reaches_any_tenant_but_holds_no_roles(monkeypatch):
+def test_service_principal_reaches_a_tenant_it_holds_no_group_in(monkeypatch):
     cfg = _cfg(agent_user="svc@platform.test")
     conn = _FakeConn({})            # in no tenant group anywhere
     monkeypatch.setattr(ldap_auth, "Server", lambda *a, **k: object())
     monkeypatch.setattr(ldap_auth, "Connection", lambda *a, **k: conn)
 
     ident = ldap_auth._authenticate_against("ldap://x", cfg, "SVC@Platform.test", "pw", "beta")
-    assert ident.authenticated          # infrastructure reaches every tenant
-    assert ident.roles == []            # but is never a role-holder
+    assert ident.authenticated          # the admission test does not apply to it
+    assert ident.roles == []            # and it holds nothing there, so nothing
     assert not _is_admin(ident)
+
+
+def test_service_principal_keeps_the_roles_it_holds_in_the_tenant(monkeypatch):
+    """The exemption skips the admission test — it does not blank roles.
+
+    Blanking them broke production: the workers reach the core as this
+    principal, and stripping every role turned operations they legitimately
+    perform into PermissionDenied. The escalation to remove was the
+    CROSS-TENANT one.
+    """
+    cfg = _cfg(agent_user="svc@platform.test")
+    conn = _FakeConn({"ou=alpha,ou=tenants,dc=x": ["administrators"],
+                      "ou=beta,ou=tenants,dc=x": []})
+    monkeypatch.setattr(ldap_auth, "Server", lambda *a, **k: object())
+    monkeypatch.setattr(ldap_auth, "Connection", lambda *a, **k: conn)
+
+    here = ldap_auth._authenticate_against("ldap://x", cfg, "svc@platform.test", "pw", "alpha")
+    assert here.authenticated and "administrators" in here.roles
+
+    # ...but still never carried into a tenant it holds nothing in.
+    there = ldap_auth._authenticate_against("ldap://x", cfg, "svc@platform.test", "pw", "beta")
+    assert there.authenticated and there.roles == []
+    assert not _is_admin(there)
 
 
 def test_service_principal_match_is_case_insensitive():
