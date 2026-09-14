@@ -68,14 +68,23 @@ def resolve_identity(auth_header: str, tenant: str, config, store: TokenStore,
         token = auth_header[len("Bearer "):].strip()
         identity = store.resolve(token)
         if identity is not None:
-            return replace(identity, tenant=tenant)
+            # The token was issued for one tenant, with roles resolved there.
+            # Honour that binding instead of re-stamping the header's tenant,
+            # or a token minted for A serves requests against B.
+            if tenant and identity.tenant and tenant != identity.tenant:
+                return None
+            return identity
         if bridge is not None:
             return bridge.verify(token, tenant)
         return None
     basic = decode_basic(auth_header)
     if basic is None:
         return None
-    identity = authenticate(config, basic[0], basic[1])
+    # Resolve roles FOR the requested tenant rather than stamping the tenant on
+    # afterwards: `replace(identity, tenant=tenant)` kept whatever roles the bind
+    # found across the whole directory, so an administrator of one tenant became
+    # an administrator of the tenant named in the header.
+    identity = authenticate(config, basic[0], basic[1], tenant)
     if not identity.authenticated:
         return None
-    return replace(identity, tenant=tenant)
+    return identity

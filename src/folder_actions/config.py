@@ -86,6 +86,10 @@ class Config:
         # --- Tenant + this service's own action principal (§7.5) ---
         self.tenant = _env("FILEENGINE_FA_TENANT", "default")
         self.agent_user = _first("FILEENGINE_FA_USER", "FILEENGINE_LDAP_USER", "")
+        # Infrastructure identities exempt from the tenant-membership rule (they
+        # are not members of anything). Comma-separated; the service's own agent
+        # is always included. They carry NO tenant roles — see tenant_access.
+        self.service_principals = _env("FILEENGINE_SERVICE_PRINCIPALS", "")
         self.agent_password = _first("FILEENGINE_FA_PASSWORD", "FILEENGINE_LDAP_PASSWORD", "")
 
         # --- LDAP (SHARED) ---

@@ -27,6 +27,7 @@ from ldap3 import Server, Connection, ALL, SUBTREE
 from ldap3.core.exceptions import LDAPException
 
 from .failover import CircuitBreaker
+from .tenant_access import is_service_principal, roles_in_tenant
 
 
 @dataclass
@@ -67,18 +68,20 @@ def _ldap_targets(cfg):
     return [(cfg.ldap_uri_replica, False)]
 
 
-def authenticate(cfg, username: str, password: str) -> Identity:
+def authenticate(cfg, username: str, password: str,
+                 tenant: Optional[str] = None) -> Identity:
     """Bind as ``username`` to authenticate, then resolve roles from LDAP groups.
 
     Returns an Identity with ``authenticated=False`` if the bind fails or the user
     is not found. An unreachable master fails over to a configured replica."""
-    ident = Identity(user=username, tenant=cfg.tenant)
+    tenant = tenant or cfg.tenant
+    ident = Identity(user=username, tenant=tenant)
     if not username or not password:
         return ident
 
     for uri, is_primary in _ldap_targets(cfg):
         try:
-            result = _authenticate_against(uri, cfg, username, password)
+            result = _authenticate_against(uri, cfg, username, password, tenant)
             if is_primary:
                 _breaker(cfg).reset()
             return result
@@ -89,8 +92,9 @@ def authenticate(cfg, username: str, password: str) -> Identity:
     return ident
 
 
-def _authenticate_against(uri: str, cfg, username: str, password: str) -> Identity:
-    ident = Identity(user=username, tenant=cfg.tenant)
+def _authenticate_against(uri: str, cfg, username: str, password: str,
+                          tenant: str) -> Identity:
+    ident = Identity(user=username, tenant=tenant)
     server = Server(uri, get_info=ALL)
     try:
         svc = Connection(server, cfg.ldap_bind_dn, cfg.ldap_bind_password, auto_bind=True)
@@ -113,17 +117,20 @@ def _authenticate_against(uri: str, cfg, username: str, password: str) -> Identi
         except LDAPException:
             return ident
 
-        roles: List[str] = []
-        svc.search(cfg.ldap_tenant_base,
-                   f"(&(objectClass=groupOfNames)(member={user_dn}))",
-                   search_scope=SUBTREE, attributes=["cn"])
-        for entry in svc.entries:
-            cn = str(entry.cn)
-            if cn and cn not in roles:
-                roles.append(cn)
-
-        if "administrators" in roles and "system_admin" not in roles:
-            roles.append("system_admin")
+        # Roles held in THIS tenant. Searching the whole tenant base returned a
+        # union, so a user who was `administrators` anywhere authenticated as an
+        # administrator everywhere once the caller stamped on the requested
+        # tenant. Empty means not a member.
+        roles = roles_in_tenant(svc, cfg, user_dn, tenant)
+        if not roles:
+            # Infrastructure identities are not tenant members and hold no
+            # tenant roles; they reach every tenant deliberately, and the core's
+            # ACL check remains their only authority over content.
+            if is_service_principal(cfg, username):
+                ident.roles = []
+                ident.authenticated = True
+                return ident
+            return ident          # authenticated=False: bound, but not a member
 
         ident.roles = roles
         ident.authenticated = True
