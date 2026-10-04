@@ -24,6 +24,7 @@ The tenant is per-session: ``X-Tenant`` header or a Host subdomain label, else t
 configured default — independent of the user's LDAP entry.
 """
 import base64
+import os
 from dataclasses import replace
 from typing import Optional, Tuple
 
@@ -44,16 +45,30 @@ def decode_basic(header_value: str) -> Optional[Tuple[str, str]]:
     return user, password
 
 
+def _reserved_labels() -> frozenset:
+    """Host labels that are never a tenant, matching the bridge's
+    ``isReservedTenantLabel``. ``login`` (or ``LOGIN_SUBDOMAIN``) is the shared
+    sign-in origin, which also serves the workspace when a tenant's own
+    subdomain is unreachable; resolving it as a tenant would let a request that
+    carries no X-Tenant reach the core as tenant "login", which the core
+    auto-registers. Read per call so a test or a restart picks up the setting."""
+    login = (os.environ.get("LOGIN_SUBDOMAIN") or "login").strip().lower()
+    return frozenset({"www", "api", "localhost", login})
+
+
 def extract_tenant(headers: dict, host: str, default: str) -> str:
-    explicit = headers.get("x-tenant")
-    if explicit:
-        return explicit.strip()
+    reserved = _reserved_labels()
+    explicit = (headers.get("x-tenant") or "").strip()
+    # A reserved name in X-Tenant is ignored, not obeyed — as the bridge's
+    # resolveTenant does — so the header cannot name the sign-in origin either.
+    if explicit and explicit.lower() not in reserved:
+        return explicit
     host = (host or "").split(":", 1)[0]
     labels = host.split(".")
     if len(labels) >= 3:
         # Tenant ids contain no hyphen; <tenant>-<interface> resolves to the tenant.
         first = labels[0].strip().lower().split("-", 1)[0]
-        if first and first not in ("www", "api", "localhost"):
+        if first and first not in reserved:
             return first
     return default
 
