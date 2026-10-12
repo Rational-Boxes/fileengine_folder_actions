@@ -17,8 +17,11 @@
 
 A classifier set is a reusable, **tenant-scoped** object (defined once, routed
 per-folder by ``sorter_route``). Because a set spans folders it is **not** governed
-by any single folder's ACL — the whole editor surface is **tenant-admin gated**
-(``deps.require_tenant_admin``). The endpoints:
+by any single folder's ACL — every endpoint that CHANGES or scores a set is
+**tenant-admin gated** (``deps.require_tenant_admin``). The two plain reads
+(``GET /classifier-sets`` and ``GET /classifier-sets/{id}``) are open to any tenant
+member, in a reduced form (names only, no terms), because a folder writer choosing a
+set for a sorter binding needs them. The endpoints:
 
   GET/POST     /classifier-sets
   GET/PUT/DELETE /classifier-sets/{id}
@@ -45,7 +48,7 @@ from pydantic import BaseModel
 from . import classifier_io
 from .classifier import document_classifier_simple, find_term_matches, normalize_text
 from .config import Config
-from .deps import require_tenant_admin
+from .deps import identity, require_tenant_admin
 from .ldap_auth import Identity
 
 log = logging.getLogger("folder_actions.classifier_api")
@@ -82,9 +85,29 @@ class TestRequest(BaseModel):
     file_uid: Optional[str] = None
 
 
+# READING a set is open to any member of the tenant; everything that changes one
+# stays tenant-admin. The binding editor is a folder WRITER's tool, and a writer who
+# is not an administrator could choose an action type (the sorter) whose form then
+# failed with "tenant administrator required" — the admin gate was on the dropdown,
+# not on the thing it protects. Same split as notify templates: list for everyone,
+# manage for administrators.
+#
+# What a non-administrator gets is what CHOOSING needs and no more: the set's id
+# and name, and its classification names (to lay out the sorter's routes). Not the
+# terms — those are the scoring rules an administrator curates — and not who
+# created it.
+def _member_view(full: dict) -> dict:
+    return {"id": full["id"], "name": full["name"],
+            "classifiers": [{"id": c["id"], "name": c["name"]}
+                            for c in full.get("classifiers", [])]}
+
+
 @router.get("/classifier-sets")
-def list_sets(request: Request, ident: Identity = Depends(require_tenant_admin)) -> list[dict]:
-    return request.app.state.store.list_classifier_sets(ident.tenant)
+def list_sets(request: Request, ident: Identity = Depends(identity)) -> list[dict]:
+    sets = request.app.state.store.list_classifier_sets(ident.tenant)
+    if ident.is_admin:
+        return sets
+    return [{"id": s["id"], "name": s["name"]} for s in sets]
 
 
 @router.post("/classifier-sets")
@@ -97,11 +120,11 @@ def create_set(request: Request, body: SetCreate,
 
 @router.get("/classifier-sets/{set_id}")
 def get_set(set_id: str, request: Request,
-            ident: Identity = Depends(require_tenant_admin)) -> dict:
+            ident: Identity = Depends(identity)) -> dict:
     full = request.app.state.store.get_classifier_set_full(ident.tenant, set_id)
     if full is None:
         raise HTTPException(status_code=404, detail="Classifier set not found")
-    return full
+    return full if ident.is_admin else _member_view(full)
 
 
 @router.put("/classifier-sets/{set_id}")
