@@ -68,7 +68,7 @@ class FieldOption(BaseModel):
 
 class VisibleWhen(BaseModel):
     key: str
-    equals: Any
+    equals: Any        # a list means "any of these"
 
 
 class FieldDescriptor(BaseModel):
@@ -93,7 +93,7 @@ class FieldDescriptor(BaseModel):
     pattern: Optional[str] = None
     # select / multiselect
     options: Optional[list[FieldOption]] = None
-    options_source: Optional[str] = None  # event_catalog | classifier_sets | mime_catalog
+    options_source: Optional[str] = None  # event_catalog | classifier_sets | mime_catalog | prompt_sets (csai, read by the SPA)
     # group (repeatable rows)
     item_fields: Optional[list["FieldDescriptor"]] = None
     # secret (write-only) / conditional visibility
@@ -157,6 +157,10 @@ class ActionContext:
     store: "Store"
     config: "Config"
     log: logging.Logger = log
+    #: Which delivery of this event this is (1 = first). A plug-in whose own
+    #: limit is lower than the consumer's (webhook ``max_retries``) can give up
+    #: early by returning a terminal result.
+    attempt: int = 1
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ import base64
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 
 log = logging.getLogger("folder_actions.csai")
@@ -32,6 +33,20 @@ log = logging.getLogger("folder_actions.csai")
 
 class TextNotReady(Exception):
     """CSAI has no extracted text for the file yet (202 / not found)."""
+
+
+class CsaiError(Exception):
+    """A csai call failed. ``retryable`` for 429 / 5xx / unreachable."""
+
+    def __init__(self, status: int, body: bytes = b""):
+        self.status = status
+        try:
+            self.body = json.loads(body.decode("utf-8")) if body else {}
+        except ValueError:
+            self.body = {}
+        self.kind = (self.body.get("kind") if isinstance(self.body, dict) else "") or ""
+        self.retryable = status == 0 or status == 429 or status >= 500
+        super().__init__(f"csai HTTP {status} {self.kind}".strip())
 
 
 class CsaiClient:
@@ -44,17 +59,55 @@ class CsaiClient:
             raw = f"{user}:{pw}".encode("utf-8")
             self._auth = "Basic " + base64.b64encode(raw).decode("ascii")
 
-    def _request(self, method: str, path: str, tenant: str) -> tuple[int, bytes]:
-        req = urllib.request.Request(f"{self.base}{path}", method=method)
+    def _request(self, method: str, path: str, tenant: str,
+                 body: dict | None = None) -> tuple[int, bytes]:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(f"{self.base}{path}", method=method, data=data)
         if self._auth:
             req.add_header("Authorization", self._auth)
         if tenant:
             req.add_header("X-Tenant", tenant)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return resp.status, resp.read()
         except urllib.error.HTTPError as e:
             return e.code, e.read() if e.fp else b""
+
+    def _json(self, method: str, path: str, tenant: str, body: dict | None = None) -> dict:
+        try:
+            status, raw = self._request(method, path, tenant, body)
+        except (urllib.error.URLError, OSError) as e:
+            log.warning("csai unreachable: %s", e)
+            raise CsaiError(0)
+        if 200 <= status < 300:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        raise CsaiError(status, raw)
+
+    # -- extraction (convert_search_ai EXTRACTION_PROMPT_SETS.md §6) --
+    def start_extract_job(self, tenant: str, *, file_uid: str, version: str, prompt_set: str,
+                          revision: int | None = None, markup: bool = True,
+                          binding_id: str = "") -> str:
+        """Queue an extraction; csai answers at once and announces the outcome
+        as extraction.complete / extraction.failed. Returns the job id."""
+        out = self._json("POST", "/v1/extract/jobs", tenant, {
+            "file_uid": file_uid, "version": version or "", "prompt_set": prompt_set,
+            "revision": revision, "markup": bool(markup), "binding_id": binding_id})
+        return out.get("job_id", "")
+
+    def get_extractions(self, tenant: str, file_uid: str, *, version: str = "",
+                        entry: str = "", prompt_set: str = "") -> list:
+        """A document version's extracted values with what they mean (field
+        definitions or the raw schema), read as the service principal."""
+        params = urllib.parse.urlencode({k: v for k, v in (("version", version), ("entry", entry),
+                                                           ("prompt_set", prompt_set)) if v})
+        out = self._json("GET", f"/v1/documents/{urllib.parse.quote(file_uid)}/extractions"
+                                f"{'?' + params if params else ''}", tenant)
+        return out.get("entries") or []
+
+    def list_prompt_sets(self, tenant: str) -> list:
+        return self._json("GET", "/v1/prompt-sets?limit=500", tenant).get("prompt_sets") or []
 
     def get_text(self, file_uid: str, tenant: str) -> str:
         """The file's extracted Markdown. Raises TextNotReady when unavailable."""

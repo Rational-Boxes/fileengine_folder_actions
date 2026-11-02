@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .base import ActionContext, ActionResult, FieldDescriptor, register
 
@@ -49,6 +49,23 @@ class NotifyAction:
     class ConfigModel(BaseModel):
         recipients: list[str] = []       # uids, emails, or "role:<name>"
         template: Optional[str] = None   # optional email template (§7.2)
+
+        @field_validator("recipients", mode="before")
+        @classmethod
+        def _rows_to_principals(cls, v):
+            # The binding editor renders `recipients` as a `group` of
+            # {principal} rows (config_fields below), so that is the shape it
+            # saves; API callers send plain strings. Accept both, or every
+            # notify binding made in the UI is refused at save (422).
+            if not isinstance(v, list):
+                return v
+            out = []
+            for item in v:
+                if isinstance(item, dict):
+                    item = item.get("principal")
+                if isinstance(item, str) and item.strip():
+                    out.append(item.strip())
+            return out
 
     @classmethod
     def config_fields(cls) -> list[FieldDescriptor]:
@@ -157,6 +174,10 @@ class NotifyAction:
             "folder_uid": ctx.folder_uid or "",
             "link": link or "",
         }
+        # Extra placeholders a calling action supplies, e.g. the extracted
+        # values ({fire_rating}) when extraction_rules sends the email.
+        for k, v in (event.get("template_values") or {}).items():
+            values.setdefault(str(k), "" if v is None else str(v))
 
         def render(s: str) -> str:
             for k, v in values.items():

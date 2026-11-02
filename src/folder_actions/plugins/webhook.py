@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 from .base import ActionContext, ActionResult, FieldDescriptor, FieldOption, register
 
@@ -45,9 +45,13 @@ SUPPORTED = frozenset({
     "file.restored", "review.approved", "review.rejected", "thread.opened",
     "comment.created", "mention.created", "thread.resolved", "conversion.complete",
     "conversion.failed",
+    # Extracted data (convert_search_ai EXTRACTION_PROMPT_SETS.md §6.3): opt in
+    # by choosing these events; the payload then carries an `extracted` key.
+    "extraction.complete", "extraction.failed",
 })
 
-_BACKOFF_CAP_S = 30.0
+#: The `extracted` key is capped; over it quotes go first, then the values.
+EXTRACTED_MAX_BYTES = 256 * 1024
 
 
 @register
@@ -69,6 +73,49 @@ class WebhookAction:
         grant_read: bool = False        # mint scoped read-back token (v1: accepted, TODO)
         timeout_s: int = 10
         max_retries: int = 5
+        # Extracted data (§6.3). Used when the binding fires on an extraction
+        # event, or on any event with extraction_attach = "latest".
+        extraction_prompt_sets: list[str] = []      # empty = any prompt set
+        extraction_include_raw: bool = False        # raw-schema extractions too
+        extraction_fields: list[str] = []           # empty = every field
+        extraction_include_evidence: bool = False   # quotes are document text
+        extraction_only_found: bool = False
+        extraction_attach: str = "none"             # none | latest
+
+        # The binding editor saves the flat shape of config_fields below:
+        # `auth_type` / `token_url` / `client_id` / `scopes` at the top level
+        # and `context` as {key, value} rows. API callers send `auth{}` and a
+        # dict. Accept both: before this, a UI-made webhook was refused at save
+        # (`context` is a list) and its OAuth settings were ignored.
+        @model_validator(mode="before")
+        @classmethod
+        def _flat_auth(cls, data):
+            if not isinstance(data, dict):
+                return data
+            data = dict(data)
+            auth = dict(data.get("auth") or {})
+            for flat, key in (("auth_type", "type"), ("token_url", "token_url"),
+                              ("client_id", "client_id"), ("scopes", "scopes")):
+                if data.get(flat) not in (None, "") and auth.get(key) in (None, ""):
+                    auth[key] = data[flat]
+            data["auth"] = auth
+            return data
+
+        @field_validator("extraction_fields", mode="before")
+        @classmethod
+        def _field_rows(cls, v):
+            if isinstance(v, list):
+                return [str(r.get("name")).strip() if isinstance(r, dict) else str(r).strip()
+                        for r in v if (r.get("name") if isinstance(r, dict) else r)]
+            return v
+
+        @field_validator("context", mode="before")
+        @classmethod
+        def _rows_to_dict(cls, v):
+            if isinstance(v, list):
+                return {str(r.get("key")).strip(): "" if r.get("value") is None else str(r.get("value"))
+                        for r in v if isinstance(r, dict) and str(r.get("key") or "").strip()}
+            return v
 
     @classmethod
     def config_fields(cls) -> list[FieldDescriptor]:
@@ -114,6 +161,32 @@ class WebhookAction:
                             default=10, min=1, max=120, step=1),
             FieldDescriptor(key="max_retries", label="Max retries", type="integer",
                             default=5, min=0, max=10, step=1),
+            # --- extracted data: these SEND DOCUMENT VALUES TO THE URL ---
+            FieldDescriptor(
+                key="extraction_prompt_sets", label="Extracted data: only these prompt sets",
+                type="multiselect", options_source="prompt_sets",
+                help="For the 'extraction complete/failed' events, and for 'attach the latest "
+                     "values'. Empty = any prompt set. Extracted values are sent to the URL."),
+            FieldDescriptor(key="extraction_include_raw",
+                            label="Extracted data: include extractions without a prompt set",
+                            type="boolean", default=False),
+            FieldDescriptor(
+                key="extraction_fields", label="Extracted data: only these fields", type="group",
+                item_fields=[FieldDescriptor(key="name", label="Field name", type="string",
+                                             required=True)],
+                help="Empty = every field."),
+            FieldDescriptor(
+                key="extraction_include_evidence", label="Extracted data: include the quotes",
+                type="boolean", default=False,
+                help="Quotes are the document's own words; off unless the receiver needs them."),
+            FieldDescriptor(key="extraction_only_found",
+                            label="Extracted data: leave out fields that were not found",
+                            type="boolean", default=False),
+            FieldDescriptor(
+                key="extraction_attach", label="Attach the latest extracted values to other events",
+                type="select", default="none",
+                options=[FieldOption(value="none", label="No"),
+                         FieldOption(value="latest", label="Yes, for the file's current version")]),
         ]
 
     # ------------------------------------------------------------------ execute
@@ -126,6 +199,10 @@ class WebhookAction:
             return ActionResult.failed("no_url")
 
         file_uid = event.get("file_uid") or ""
+        if etype in ("extraction.complete", "extraction.failed"):
+            why = self._skip_extraction(event, config)
+            if why:
+                return ActionResult.skipped(why)
 
         # (a) Resolve the file's content-sniffed MIME for the payload (best-effort).
         # The MIME *whitelist* is now a binding-level filter enforced by the consumer
@@ -154,18 +231,36 @@ class WebhookAction:
         if auth_header:
             headers["Authorization"] = auth_header
 
-        # (e) POST with bounded exponential-backoff retries.
-        status, resp_body, transient = self._post_with_retries(
-            config.url, body, headers, config.timeout_s, config.max_retries, ctx)
+        # (e) ONE attempt per delivery. Retries are the consumer's: a transient
+        # failure leaves the event un-acked and it is re-claimed after
+        # FA_RETRY_DELAY_S. Sleeping here (the old in-process backoff, up to
+        # minutes) stalled every other folder's events behind one slow URL.
+        status, resp_body, transient = self._post_once(
+            config.url, body, headers, config.timeout_s)
 
         if status is not None and 200 <= status < 300:
-            return self._handle_2xx(status, resp_body, event, ctx)
+            result = self._handle_2xx(status, resp_body, event, ctx)
+            ext = payload.get("extracted")
+            if ext:
+                # The run log records what was sent, never the values (§6.3).
+                ps = ext.get("prompt_set") or {}
+                result.detail["extracted"] = {
+                    "status": ext.get("status"), "prompt_set": ps.get("id"),
+                    "revision": ps.get("revision"), "fields": len(ext.get("values") or {}),
+                    "quotes": bool(config.extraction_include_evidence),
+                    "too_large": bool(ext.get("too_large"))}
+            return result
 
         # 4xx (except 429) is caller misconfiguration — no retry.
         if not transient:
             return ActionResult.failed("http_error", status=status)
-        # Transient exhausted — leave retryable so the consumer may redeliver.
-        return ActionResult.failed("exhausted", retryable=True, status=status)
+        # This binding's own limit (attempt 1 is the first try, not a retry).
+        if ctx.attempt > max(0, config.max_retries):
+            ctx.log.warning("webhook: giving up on %s after %d attempts (last status %s)",
+                            config.url, ctx.attempt, status)
+            return ActionResult.failed("exhausted", status=status, attempts=ctx.attempt)
+        return ActionResult.failed("transient", retryable=True, status=status,
+                                   attempt=ctx.attempt)
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -205,7 +300,96 @@ class WebhookAction:
         }
         if config.grant_read:
             payload["grant_read"] = True  # remote hint; token not yet minted (see TODO)
+        etype = event.get("type")
+        if etype in ("extraction.complete", "extraction.failed"):
+            payload["extracted"] = self._extracted_for_event(event, config, ctx)
+        elif config.extraction_attach == "latest" and file_uid:
+            payload["extracted"] = self._extracted_latest(file_uid, config, ctx)
         return payload
+
+    # ------------------------------------------------------------------ extracted data
+    @staticmethod
+    def _skip_extraction(event: dict, config) -> str:
+        ps = event.get("prompt_set") or None
+        if ps is None and not config.extraction_include_raw:
+            return "raw_schema_extraction"
+        if config.extraction_prompt_sets and (not ps or ps.get("id")
+                                              not in config.extraction_prompt_sets):
+            return "other_prompt_set"
+        return ""
+
+    def _extracted_for_event(self, event: dict, config, ctx: ActionContext) -> dict:
+        base = {"prompt_set": event.get("prompt_set"), "model": event.get("model"),
+                "source": event.get("source")}
+        if event.get("type") == "extraction.failed":
+            return {"status": "failed", "reason": event.get("reason"), **base}
+        payload = event.get("payload") or {}
+        try:
+            entries = ctx.csai.get_extractions(ctx.tenant, event.get("file_uid") or "",
+                                               version=event.get("version") or "",
+                                               entry=payload.get("entry") or "")
+        except Exception:
+            ctx.log.warning("webhook: could not read extracted values for %s",
+                            event.get("file_uid"), exc_info=True)
+            entries = []
+        if not entries:
+            return {"status": "unavailable", "entry": payload.get("entry"), **base}
+        block = self._shape(entries[0], config, counts=event.get("counts"),
+                            markup=event.get("markup"))
+        return {"status": "complete", **base, **block}
+
+    def _extracted_latest(self, file_uid: str, config, ctx: ActionContext) -> dict:
+        try:
+            entries = ctx.csai.get_extractions(ctx.tenant, file_uid)
+        except Exception:
+            return {"status": "unavailable"}
+        for e in sorted(entries, key=lambda e: e.get("created_at") or "", reverse=True):
+            ps = e.get("prompt_set") or None
+            if ps is None and not config.extraction_include_raw:
+                continue
+            if config.extraction_prompt_sets and (not ps or ps.get("id")
+                                                  not in config.extraction_prompt_sets):
+                continue
+            return {"status": "complete", "prompt_set": ps, "model": e.get("model_choice"),
+                    "source": e.get("source"), **self._shape(e, config)}
+        return {"status": "none"}
+
+    @staticmethod
+    def _shape(entry: dict, config, *, counts=None, markup=None) -> dict:
+        data = entry.get("data") or {}
+        names = config.extraction_fields or list(data)
+        values = {}
+        for name in names:
+            v = data.get(name)
+            if v is None or (config.extraction_only_found and not v.get("found")):
+                continue
+            ev = v.get("evidence") or None
+            values[name] = {"found": bool(v.get("found")), "value": v.get("value"),
+                            "unit": v.get("unit"),
+                            "evidence": ({"quote": ev.get("quote"), "offset": ev.get("offset")}
+                                         if config.extraction_include_evidence and ev
+                                         else ({"offset": ev.get("offset")} if ev else None))}
+        fields = {f["name"]: {k: f[k] for k in ("label", "type", "unit", "enum", "required")
+                              if k in f}
+                  for f in entry.get("fields") or [] if f.get("name") in values}
+        out = {"extracted_at": entry.get("created_at"), "entry": entry.get("entry"),
+               "values": values}
+        if fields:
+            out["fields"] = fields
+        elif entry.get("schema"):
+            out["schema"] = entry["schema"]
+        if counts:
+            out["counts"] = counts
+        if markup:
+            out["markup"] = markup
+        raw = json.dumps(out, default=str).encode("utf-8")
+        if len(raw) > EXTRACTED_MAX_BYTES:
+            for v in values.values():
+                if v.get("evidence"):
+                    v["evidence"].pop("quote", None)
+            if len(json.dumps(out, default=str).encode("utf-8")) > EXTRACTED_MAX_BYTES:
+                return {"too_large": True, "entry": entry.get("entry")}
+        return out
 
     @staticmethod
     def _conversion_block(event: dict) -> dict:
@@ -281,34 +465,17 @@ class WebhookAction:
         except urllib.error.HTTPError as e:
             return e.code, (e.read() if e.fp else b"")
 
-    def _post_with_retries(self, url: str, body: bytes, headers: dict, timeout: int,
-                           max_retries: int, ctx: ActionContext):
-        """Returns (status|None, body, transient). ``transient`` marks a retryable
-        class of failure that was exhausted (connection/timeout/5xx/429)."""
-        attempt = 0
-        while True:
-            status = None
-            resp_body = b""
-            transient = False
-            try:
-                status, resp_body = self._post(url, body, headers, timeout)
-            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
-                transient = True
-            else:
-                if 200 <= status < 300:
-                    return status, resp_body, False
-                # 429 and 5xx are retryable; other 4xx are terminal.
-                transient = status == 429 or 500 <= status < 600
-                if not transient:
-                    return status, resp_body, False
-
-            if attempt >= max_retries:
-                ctx.log.warning("webhook: exhausted retries for %s (last status %s)",
-                                url, status)
-                return status, resp_body, True
-            delay = min(_BACKOFF_CAP_S, 2.0 ** attempt)
-            time.sleep(delay)
-            attempt += 1
+    def _post_once(self, url: str, body: bytes, headers: dict, timeout: int):
+        """Returns (status|None, body, transient). ``transient`` marks a failure
+        worth retrying (connection/timeout/5xx/429)."""
+        try:
+            status, resp_body = self._post(url, body, headers, timeout)
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            return None, b"", True
+        if 200 <= status < 300:
+            return status, resp_body, False
+        # 429 and 5xx are retryable; other 4xx are terminal.
+        return status, resp_body, status == 429 or 500 <= status < 600
 
     def _handle_2xx(self, status: int, resp_body: bytes, event: dict,
                     ctx: ActionContext) -> ActionResult:

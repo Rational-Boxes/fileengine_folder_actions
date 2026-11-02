@@ -206,6 +206,34 @@ def _validate_config(config: Config, action_type: str, cfg: dict):
     return plugin
 
 
+def _check_events(plugin, on_events) -> None:
+    """A binding fires only on events its plug-in handles; any other string was
+    accepted and then never matched, so the binding silently did nothing."""
+    supported = set(getattr(plugin, "supported_events", ()) or ())
+    unknown = [e for e in (on_events or []) if e not in supported]
+    if unknown:
+        raise HTTPException(status_code=422, detail=(
+            f"{', '.join(unknown)} cannot trigger this action; it handles "
+            f"{', '.join(sorted(supported))}"))
+
+
+def _prepare(request: Request, plugin, cfg: dict, tenant: str) -> dict:
+    """A plug-in's save-time step (``prepare_config``), e.g. the extract action
+    pinning prompt-set revisions."""
+    hook = getattr(plugin, "prepare_config", None)
+    if hook is None:
+        return cfg
+    csai = getattr(request.app.state, "csai", None)
+    if csai is None:
+        from .csai_client import CsaiClient
+        csai = CsaiClient(request.app.state.config)
+        request.app.state.csai = csai
+    try:
+        return hook(cfg, csai, tenant)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
 # ----------------------------- action types --------------------------------
 @router.get("/action-types")
 def action_types(request: Request, ident: Identity = Depends(identity)) -> list[dict]:
@@ -266,12 +294,14 @@ def create_binding(folder_uid: str, request: Request, body: BindingCreate,
     config: Config = request.app.state.config
     store = request.app.state.store
     _authorize_folder(config, ident, folder_uid, "w")
-    _validate_config(config, body.action_type, body.config)
+    plugin = _validate_config(config, body.action_type, body.config)
+    _check_events(plugin, body.on_events)
 
     # Webhook credentials are split out, encrypted and stored separately (§7.4/§11).
     clean_config, secrets = (body.config, {})
     if body.action_type == "webhook":
         clean_config, secrets = _split_secrets(body.config)
+    clean_config = _prepare(request, plugin, clean_config, ident.tenant)
 
     binding = store.create_binding(
         ident.tenant, folder_uid=folder_uid, action_type=body.action_type,
@@ -329,12 +359,16 @@ def update_binding(binding_id: str, request: Request, body: BindingUpdate,
         fields["enabled"] = body.enabled
 
     secrets: dict = {}
+    plugin = _validate_config(config, action_type,
+                              body.config if body.config is not None else binding.get("config"))
+    if body.on_events is not None or body.action_type is not None:
+        _check_events(plugin, body.on_events if body.on_events is not None
+                      else binding.get("on_events"))
     if body.config is not None:
-        _validate_config(config, action_type, body.config)
         clean_config, secrets = (body.config, {})
         if action_type == "webhook":
             clean_config, secrets = _split_secrets(body.config)
-        fields["config"] = clean_config
+        fields["config"] = _prepare(request, plugin, clean_config, ident.tenant)
 
     updated = store.update_binding(ident.tenant, binding_id, **fields)
     if secrets:

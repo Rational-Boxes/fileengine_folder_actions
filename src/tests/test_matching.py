@@ -1,3 +1,4 @@
+import pytest
 # Copyright (C) 2026 James Hickman
 #
 # This program is free software: you can redistribute it and/or modify
@@ -66,6 +67,15 @@ def test_anchored_review_event_resolves_to_parent():
     ev = {"type": "review.approved", "file_uid": "doc1", "review_id": "r1"}
     b = _binding(on_events=["review.approved"])
     assert matching.binding_matches(b, ev, core)
+
+
+@pytest.mark.parametrize("etype", ["conversion.complete", "extraction.complete",
+                                   "extraction.failed"])
+def test_csai_events_resolve_to_the_files_folder(etype):
+    # csai's events carry file_uid but no parent_uid; the folder comes from core.
+    core = FakeCore({"doc1": "F"})
+    ev = {"type": etype, "file_uid": "doc1"}
+    assert matching.binding_matches(_binding(on_events=[etype]), ev, core)
 
 
 def test_recursive_binding_matches_descendant():

@@ -171,7 +171,11 @@ class Config:
 
         # --- Consumer tuning ---
         self.consumer_name = _env("FA_CONSUMER_NAME", "worker-1")
+        # Retries of a retryable failure: the entry stays un-acked and is
+        # re-claimed after FA_RETRY_DELAY_S, up to FA_ACTION_MAX_RETRIES times,
+        # then recorded as failed (reason retries_exhausted) and acked.
         self.action_max_retries = _int("FA_ACTION_MAX_RETRIES", 5)
+        self.retry_delay_s = _int("FA_RETRY_DELAY_S", 60)
 
         # --- Reconcile sweep (§8) ---
         self.reconcile_enabled = _bool("FA_RECONCILE_ENABLED", True)
