@@ -22,4 +22,4 @@ register instead through the ``folder_actions.actions`` entry-point group
 (base.load_entrypoint_plugins)."""
 from __future__ import annotations
 
-from . import move_review, notify, raise_review, sorter, webhook  # noqa: F401
+from . import extract, move_review, notify, raise_review, sorter, webhook  # noqa: F401

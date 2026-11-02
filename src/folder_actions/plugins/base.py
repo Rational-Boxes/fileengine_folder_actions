@@ -93,7 +93,7 @@ class FieldDescriptor(BaseModel):
     pattern: Optional[str] = None
     # select / multiselect
     options: Optional[list[FieldOption]] = None
-    options_source: Optional[str] = None  # event_catalog | classifier_sets | mime_catalog
+    options_source: Optional[str] = None  # event_catalog | classifier_sets | mime_catalog | prompt_sets (csai, read by the SPA)
     # group (repeatable rows)
     item_fields: Optional[list["FieldDescriptor"]] = None
     # secret (write-only) / conditional visibility
