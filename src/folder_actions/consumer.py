@@ -25,6 +25,7 @@ only after they reach a terminal state — a plug-in that returns a *retryable*
 from __future__ import annotations
 
 import logging
+import time
 
 from pydantic import ValidationError
 
@@ -85,7 +86,8 @@ class EventConsumer:
         return self._core_cache[t]
 
     # ------------------------------------------------------------------ dispatch
-    def handle(self, event: dict, *, collapse_on_content: bool = False) -> bool:
+    def handle(self, event: dict, *, collapse_on_content: bool = False,
+               attempt: int = 1, final: bool = False) -> bool:
         """Process one event across all its matching bindings.
 
         Returns ``True`` if the entry should be left **un-acked** for redelivery
@@ -94,7 +96,11 @@ class EventConsumer:
 
         ``collapse_on_content`` adds the ``(file_uid, version)`` idempotency check on
         top of the usual ``(event_id, binding_id)`` dedupe — used by the reconcile
-        sweep (§8), whose synthesized event ids never collide with the core's."""
+        sweep (§8), whose synthesized event ids never collide with the core's.
+
+        ``attempt`` is the delivery count; on the ``final`` attempt a retryable
+        failure is recorded as failed (``retries_exhausted``) instead of being
+        left for another redelivery."""
         event_type = event.get("type") or ""
         event_id = event.get("event_id") or ""
 
@@ -119,7 +125,8 @@ class EventConsumer:
         for binding in bindings:
             try:
                 if self._run_binding(event, binding, tenant, event_id, core,
-                                     collapse_on_content=collapse_on_content):
+                                     collapse_on_content=collapse_on_content,
+                                     attempt=attempt, final=final):
                     redeliver = True
             except Exception:
                 # Isolation: one binding failing never aborts the loop (§6/§8).
@@ -131,7 +138,8 @@ class EventConsumer:
 
     def _run_binding(self, event: dict, binding: dict, tenant: str,
                      event_id: str, core: CoreClient, *,
-                     collapse_on_content: bool = False) -> bool:
+                     collapse_on_content: bool = False,
+                     attempt: int = 1, final: bool = False) -> bool:
         """Run a single binding for an event. Returns ``True`` iff the run was a
         retryable (non-terminal) failure and the entry should not yet be acked.
         ``core`` is bound to the event's tenant (§3.2)."""
@@ -212,7 +220,8 @@ class EventConsumer:
             folder_uid=binding.get("folder_uid") or "",
             core=core, csai=self.csai, directory=self.directory,
             discussion=self.discussion, mailer=self.mailer, secrets=self.secrets,
-            mime=mime_resolver, store=self.store, config=self.config, log=log)
+            mime=mime_resolver, store=self.store, config=self.config, log=log,
+            attempt=attempt)
 
         try:
             result = plugin_cls().execute(event, cfg_model, ctx)
@@ -231,9 +240,21 @@ class EventConsumer:
         # A retryable failure is *not* terminal: leave the entry un-acked and do not
         # record a run (so redelivery re-attempts rather than dedupe-skipping) (§8).
         if result.retryable and result.status != STATUS_DONE:
-            log.info("binding %s: retryable failure on event %s — leaving un-acked",
-                     binding_id, event_id)
-            return True
+            if not final:
+                log.info("binding %s: retryable failure on event %s (attempt %d) — "
+                         "leaving un-acked", binding_id, event_id, attempt)
+                return True
+            # Out of retries: record it, so the run log shows the failure and
+            # a replay can pick it up, rather than retrying forever.
+            log.warning("binding %s: giving up on event %s after %d attempts",
+                        binding_id, event_id, attempt)
+            self.store.record_run(
+                tenant, event_id=event_id, binding_id=binding_id,
+                action_type=action_type, file_uid=file_uid, version=version,
+                status=STATUS_FAILED,
+                detail={**(result.detail or {}), "reason": "retries_exhausted",
+                        "attempts": attempt})
+            return False
 
         self.store.record_run(
             tenant, event_id=event_id, binding_id=binding_id,
@@ -255,6 +276,33 @@ class EventConsumer:
                           binding.get("id"), event_id)
 
     # --------------------------------------------------------------------- loop
+    def retry_pending(self, source) -> int:
+        """Re-run entries left un-acked by a retryable failure once they have
+        waited ``retry_delay_s``; give up after ``action_max_retries`` retries.
+        Returns how many entries were resolved (acked)."""
+        resolved = 0
+        min_idle_ms = max(1, self.config.retry_delay_s) * 1000
+        limit = max(0, self.config.action_max_retries) + 1     # first delivery + retries
+        try:
+            batch = source.claim_stale(min_idle_ms, count=32)
+        except Exception:
+            log.exception("folder_actions could not claim pending entries for retry")
+            return 0
+        for msg_id, event, deliveries in batch:
+            if not event:                  # trimmed from the stream: nothing to run
+                source.ack([msg_id])
+                resolved += 1
+                continue
+            redeliver = False
+            try:
+                redeliver = self.handle(event, attempt=deliveries, final=deliveries >= limit)
+            except Exception:
+                log.exception("unhandled error retrying entry %s", msg_id)
+            if not redeliver:
+                source.ack([msg_id])
+                resolved += 1
+        return resolved
+
     def run_forever(self, source: RedisEventSource) -> None:
         """Poll the stream and process batches until interrupted (§8: ack after a
         terminal state; a retryable entry is left un-acked for redelivery)."""
@@ -296,6 +344,7 @@ class EventConsumer:
             log.exception("folder_actions failed to drain pending entries; continuing")
 
         try:
+            last_retry = time.monotonic()
             while True:
                 for msg_id, event in source.read(count=32, block_ms=5000):
                     redeliver = False
@@ -307,6 +356,9 @@ class EventConsumer:
                         redeliver = False
                     if not redeliver:
                         source.ack([msg_id])
+                if time.monotonic() - last_retry >= max(1, self.config.retry_delay_s) / 2:
+                    self.retry_pending(source)
+                    last_retry = time.monotonic()
         except KeyboardInterrupt:  # pragma: no cover - operator stop
             log.info("folder_actions consumer stopping")
 

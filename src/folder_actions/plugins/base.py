@@ -157,6 +157,10 @@ class ActionContext:
     store: "Store"
     config: "Config"
     log: logging.Logger = log
+    #: Which delivery of this event this is (1 = first). A plug-in whose own
+    #: limit is lower than the consumer's (webhook ``max_retries``) can give up
+    #: early by returning a terminal result.
+    attempt: int = 1
 
 
 # ---------------------------------------------------------------------------

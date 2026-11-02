@@ -34,6 +34,10 @@ from typing import Optional
 
 from .ldap_auth import Identity, authenticate
 
+#: proto FileType.DIRECTORY (fileservice.proto); kept literal so this module
+#: still imports without the gRPC stubs.
+_DIRECTORY = 1
+
 log = logging.getLogger("folder_actions.core_client")
 
 # Internal fileengine::Permission bit flags (file_engine_core acl_manager.h) mapped
@@ -202,15 +206,20 @@ class CoreClient:
         return list(self._client().get_resource_acls(uid, tenant=self.tenant) or [])
 
     # -- writes (as the service principal) --
-    def move(self, file_uid: str, destination_folder: str, *, normalize: bool = True) -> bool:
+    def move(self, file_uid: str, destination_folder: str, *, normalize: bool = True,
+             new_name: Optional[str] = None) -> bool:
         """Move ``file_uid`` into ``destination_folder`` as the service principal.
 
         When ``normalize`` (default), a moved file's permissions are normalized to
         its new folder as a post-move followup (§7.7): the file keeps only the ACL
         profile of its destination, not stale grants from where it came from. The
         normalization is best-effort — it never fails or reverses a completed move
-        (the file has already moved and the ``file.moved`` event has fired)."""
-        ok = self._client().move(file_uid, destination_folder, tenant=self.tenant)
+        (the file has already moved and the ``file.moved`` event has fired).
+
+        ``new_name`` renames it as part of the move (the client moves, then
+        renames)."""
+        ok = self._client().move(file_uid, destination_folder, new_name or None,
+                                 tenant=self.tenant)
         if ok and normalize:
             try:
                 self.normalize_permissions(file_uid, destination_folder)
@@ -218,6 +227,40 @@ class CoreClient:
                 log.warning("permission normalization failed for %s -> %s (move kept)",
                             file_uid, destination_folder, exc_info=True)
         return ok
+
+    def rename(self, uid: str, new_name: str) -> bool:
+        return self._client().rename(uid, new_name, tenant=self.tenant)
+
+    def copy(self, file_uid: str, destination_folder: str, *,
+             new_name: Optional[str] = None) -> str:
+        """Copy ``file_uid`` into ``destination_folder``; returns the copy's uid
+        ("" if it cannot be identified), renamed to ``new_name`` if given.
+
+        The core's Copy answers only success, not the new uid, so the copy is
+        found as the entry with the source's name that was not in the folder
+        before. Two copies of the same name into one folder at the same moment
+        could be confused; a ``new_uid`` in CopyResponse would remove that and
+        is the follow-up."""
+        name = self.stat(file_uid).name
+        before = {e.uid for e in self.listdir(destination_folder)}
+        self._client().copy(file_uid, destination_folder, tenant=self.tenant)
+        new = [e.uid for e in self.listdir(destination_folder)
+               if e.uid not in before and e.name == name]
+        if len(new) != 1:
+            log.warning("copy %s -> %s: could not identify the copy (%d candidates)",
+                        file_uid, destination_folder, len(new))
+            return ""
+        if new_name and new_name != name:
+            self.rename(new[0], new_name)
+        return new[0]
+
+    def ensure_folder(self, parent_uid: str, name: str) -> str:
+        """The uid of the sub-folder ``name`` under ``parent_uid``, created if
+        missing (filing into a folder named after an extracted value)."""
+        for e in self.listdir(parent_uid):
+            if e.name == name and int(getattr(e, "type", 0)) == _DIRECTORY:
+                return e.uid
+        return self._client().mkdir(parent_uid, name, tenant=self.tenant)
 
     def grant_permission(self, uid: str, principal: str, permission, effect: str = "allow") -> bool:
         return self._client().grant_permission(uid, principal, permission, effect=effect,

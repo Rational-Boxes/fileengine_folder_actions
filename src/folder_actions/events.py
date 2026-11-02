@@ -96,6 +96,41 @@ class RedisEventSource:
                 out.append((_decode(msg_id), _parse_payload(fields)))
         return out
 
+    def claim_stale(self, min_idle_ms: int, count: int = 32) -> List[Tuple[str, dict, int]]:
+        """Pending entries (any consumer in the group) idle at least
+        ``min_idle_ms``, claimed by this consumer, with how many times each has
+        now been delivered.
+
+        This is the retry loop: a retryable failure leaves its entry un-acked,
+        and without this it was only seen again when the consumer restarted.
+        XAUTOCLAIM resets the idle time and bumps the delivery count, so an entry
+        comes back once per ``min_idle_ms``; the caller gives up after its
+        maximum. A claimed entry whose payload has been trimmed from the stream
+        comes back without fields and is skipped (acked) by the caller."""
+        import redis  # lazy
+        r = self._redis()
+        try:
+            resp = r.xautoclaim(self.stream, self.group, self.consumer,
+                                min_idle_time=int(min_idle_ms), start_id="0-0", count=count)
+        except redis.exceptions.TimeoutError:
+            return []
+        messages = resp[1] if resp and len(resp) > 1 else []
+        out: List[Tuple[str, dict, int]] = []
+        if not messages:
+            return out
+        ids = [_decode(m[0]) for m in messages]
+        counts = {}
+        try:
+            for p in r.xpending_range(self.stream, self.group, min=ids[0], max=ids[-1],
+                                      count=max(len(ids) * 4, 32), consumername=self.consumer):
+                counts[_decode(p["message_id"])] = int(p.get("times_delivered") or 1)
+        except Exception:
+            pass
+        for msg_id, fields in messages:
+            mid = _decode(msg_id)
+            out.append((mid, _parse_payload(fields) if fields else {}, counts.get(mid, 1)))
+        return out
+
     def ack(self, msg_ids: List[str]) -> None:
         if msg_ids:
             self._redis().xack(self.stream, self.group, *msg_ids)

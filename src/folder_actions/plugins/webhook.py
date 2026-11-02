@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 from .base import ActionContext, ActionResult, FieldDescriptor, FieldOption, register
 
@@ -46,8 +46,6 @@ SUPPORTED = frozenset({
     "comment.created", "mention.created", "thread.resolved", "conversion.complete",
     "conversion.failed",
 })
-
-_BACKOFF_CAP_S = 30.0
 
 
 @register
@@ -69,6 +67,33 @@ class WebhookAction:
         grant_read: bool = False        # mint scoped read-back token (v1: accepted, TODO)
         timeout_s: int = 10
         max_retries: int = 5
+
+        # The binding editor saves the flat shape of config_fields below:
+        # `auth_type` / `token_url` / `client_id` / `scopes` at the top level
+        # and `context` as {key, value} rows. API callers send `auth{}` and a
+        # dict. Accept both: before this, a UI-made webhook was refused at save
+        # (`context` is a list) and its OAuth settings were ignored.
+        @model_validator(mode="before")
+        @classmethod
+        def _flat_auth(cls, data):
+            if not isinstance(data, dict):
+                return data
+            data = dict(data)
+            auth = dict(data.get("auth") or {})
+            for flat, key in (("auth_type", "type"), ("token_url", "token_url"),
+                              ("client_id", "client_id"), ("scopes", "scopes")):
+                if data.get(flat) not in (None, "") and auth.get(key) in (None, ""):
+                    auth[key] = data[flat]
+            data["auth"] = auth
+            return data
+
+        @field_validator("context", mode="before")
+        @classmethod
+        def _rows_to_dict(cls, v):
+            if isinstance(v, list):
+                return {str(r.get("key")).strip(): "" if r.get("value") is None else str(r.get("value"))
+                        for r in v if isinstance(r, dict) and str(r.get("key") or "").strip()}
+            return v
 
     @classmethod
     def config_fields(cls) -> list[FieldDescriptor]:
@@ -154,9 +179,12 @@ class WebhookAction:
         if auth_header:
             headers["Authorization"] = auth_header
 
-        # (e) POST with bounded exponential-backoff retries.
-        status, resp_body, transient = self._post_with_retries(
-            config.url, body, headers, config.timeout_s, config.max_retries, ctx)
+        # (e) ONE attempt per delivery. Retries are the consumer's: a transient
+        # failure leaves the event un-acked and it is re-claimed after
+        # FA_RETRY_DELAY_S. Sleeping here (the old in-process backoff, up to
+        # minutes) stalled every other folder's events behind one slow URL.
+        status, resp_body, transient = self._post_once(
+            config.url, body, headers, config.timeout_s)
 
         if status is not None and 200 <= status < 300:
             return self._handle_2xx(status, resp_body, event, ctx)
@@ -164,8 +192,13 @@ class WebhookAction:
         # 4xx (except 429) is caller misconfiguration — no retry.
         if not transient:
             return ActionResult.failed("http_error", status=status)
-        # Transient exhausted — leave retryable so the consumer may redeliver.
-        return ActionResult.failed("exhausted", retryable=True, status=status)
+        # This binding's own limit (attempt 1 is the first try, not a retry).
+        if ctx.attempt > max(0, config.max_retries):
+            ctx.log.warning("webhook: giving up on %s after %d attempts (last status %s)",
+                            config.url, ctx.attempt, status)
+            return ActionResult.failed("exhausted", status=status, attempts=ctx.attempt)
+        return ActionResult.failed("transient", retryable=True, status=status,
+                                   attempt=ctx.attempt)
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -281,34 +314,17 @@ class WebhookAction:
         except urllib.error.HTTPError as e:
             return e.code, (e.read() if e.fp else b"")
 
-    def _post_with_retries(self, url: str, body: bytes, headers: dict, timeout: int,
-                           max_retries: int, ctx: ActionContext):
-        """Returns (status|None, body, transient). ``transient`` marks a retryable
-        class of failure that was exhausted (connection/timeout/5xx/429)."""
-        attempt = 0
-        while True:
-            status = None
-            resp_body = b""
-            transient = False
-            try:
-                status, resp_body = self._post(url, body, headers, timeout)
-            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
-                transient = True
-            else:
-                if 200 <= status < 300:
-                    return status, resp_body, False
-                # 429 and 5xx are retryable; other 4xx are terminal.
-                transient = status == 429 or 500 <= status < 600
-                if not transient:
-                    return status, resp_body, False
-
-            if attempt >= max_retries:
-                ctx.log.warning("webhook: exhausted retries for %s (last status %s)",
-                                url, status)
-                return status, resp_body, True
-            delay = min(_BACKOFF_CAP_S, 2.0 ** attempt)
-            time.sleep(delay)
-            attempt += 1
+    def _post_once(self, url: str, body: bytes, headers: dict, timeout: int):
+        """Returns (status|None, body, transient). ``transient`` marks a failure
+        worth retrying (connection/timeout/5xx/429)."""
+        try:
+            status, resp_body = self._post(url, body, headers, timeout)
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            return None, b"", True
+        if 200 <= status < 300:
+            return status, resp_body, False
+        # 429 and 5xx are retryable; other 4xx are terminal.
+        return status, resp_body, status == 429 or 500 <= status < 600
 
     def _handle_2xx(self, status: int, resp_body: bytes, event: dict,
                     ctx: ActionContext) -> ActionResult:
