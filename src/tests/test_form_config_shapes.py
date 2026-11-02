@@ -65,7 +65,8 @@ def test_explicit_auth_wins_over_flat_keys():
 def test_every_plugin_accepts_what_its_own_form_saves():
     """The general rule: an untouched form (required fields aside) must
     validate, for every registered plug-in."""
-    required_samples = {"url": "https://x.example/h", "classifier_set_id": "cs1"}
+    required_samples = {"url": "https://x.example/h", "classifier_set_id": "cs1",
+                        "prompt_set": "ps_1"}
     for name, plugin in registry().items():
         cfg = _form_defaults(plugin)
         for f in plugin.config_fields():

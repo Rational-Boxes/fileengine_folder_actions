@@ -174,6 +174,10 @@ class NotifyAction:
             "folder_uid": ctx.folder_uid or "",
             "link": link or "",
         }
+        # Extra placeholders a calling action supplies, e.g. the extracted
+        # values ({fire_rating}) when extraction_rules sends the email.
+        for k, v in (event.get("template_values") or {}).items():
+            values.setdefault(str(k), "" if v is None else str(v))
 
         def render(s: str) -> str:
             for k, v in values.items():

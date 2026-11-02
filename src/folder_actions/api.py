@@ -228,7 +228,10 @@ def _prepare(request: Request, plugin, cfg: dict, tenant: str) -> dict:
         from .csai_client import CsaiClient
         csai = CsaiClient(request.app.state.config)
         request.app.state.csai = csai
-    return hook(cfg, csai, tenant)
+    try:
+        return hook(cfg, csai, tenant)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 # ----------------------------- action types --------------------------------

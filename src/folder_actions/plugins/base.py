@@ -68,7 +68,7 @@ class FieldOption(BaseModel):
 
 class VisibleWhen(BaseModel):
     key: str
-    equals: Any
+    equals: Any        # a list means "any of these"
 
 
 class FieldDescriptor(BaseModel):
