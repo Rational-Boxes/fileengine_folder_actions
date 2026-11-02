@@ -31,8 +31,10 @@ log = logging.getLogger("folder_actions.matching")
 # folder membership is resolved from that file's *current* parent via core (§3.2).
 # Review/comment events are file-anchored by nature; ``conversion.*`` events are
 # emitted by CSAI (not the core publisher) and are NOT enriched with parent_uid, so
-# they must be resolved the same way.
-_ANCHORED_PREFIXES = ("review.", "thread.", "comment.", "mention.", "conversion.")
+# they must be resolved the same way. ``extraction.*`` (csai's extracted-data
+# events) are in the same position: about a file, never about a folder.
+_ANCHORED_PREFIXES = ("review.", "thread.", "comment.", "mention.", "conversion.",
+                      "extraction.")
 
 # Bound depth for the recursive-binding ancestry walk (§3.2 "bounded depth, cached").
 _MAX_ANCESTRY_DEPTH = 32
